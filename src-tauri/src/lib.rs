@@ -1,7 +1,7 @@
 use image::image_dimensions;
 use pdfium_render::prelude::*;
 use serde::Serialize;
-use std::collections::{hash_map::DefaultHasher, HashMap};
+use std::collections::{hash_map::DefaultHasher, HashMap, VecDeque};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -185,6 +185,89 @@ enum PdfWorkerRequest {
     },
 }
 
+const RENDER_SUPERSEDED_ERROR: &str = "Render request superseded by newer request.";
+
+struct PendingRenderRequest {
+    session_id: String,
+    page_number: u16,
+    target_width: u16,
+    response: mpsc::Sender<Result<PdfRenderedPage, String>>,
+}
+
+fn render_pdf_page(
+    document: &PdfDocument<'_>,
+    path: &str,
+    page_number: u16,
+    target_width: u16,
+) -> Result<PdfRenderedPage, String> {
+    let page_count = document.pages().len() as u16;
+    if page_count == 0 {
+        return Err("PDF has no pages.".to_owned());
+    }
+
+    let requested_page = page_number.max(1);
+    let normalized_page = normalize_page_number(requested_page, page_count);
+    let normalized_width = normalize_target_width(target_width);
+    let output_path = render_cache_path(path, normalized_page, normalized_width)?;
+
+    if let Some(cached_page) = cached_render_response(&output_path, normalized_width)? {
+        return Ok(cached_page);
+    }
+
+    let page = document
+        .pages()
+        .get((normalized_page - 1) as u16)
+        .map_err(|error| format!("Failed to access page {}: {error:?}", normalized_page))?;
+
+    let base_width = page.width().value.max(1.0);
+    let base_height = page.height().value.max(1.0);
+    let scale = normalized_width as f32 / base_width;
+    let css_height = (base_height * scale).max(1.0);
+
+    let bitmap = page
+        .render_with_config(
+            &PdfRenderConfig::new()
+                .set_target_width(normalized_width as i32)
+                .rotate_if_landscape(PdfPageRenderRotation::None, true),
+        )
+        .map_err(|error| format!("Failed to render page {}: {error:?}", normalized_page))?;
+
+    let image = bitmap.as_image();
+    let temp_output_path = output_path.with_extension("tmp.jpg");
+
+    image
+        .save(&temp_output_path)
+        .map_err(|error| format!("Failed to persist rendered page image: {error}"))?;
+
+    fs::rename(&temp_output_path, &output_path)
+        .map_err(|error| format!("Failed to finalize rendered page image: {error}"))?;
+
+    let verbose_render = std::env::var("PIDF_VERBOSE_RENDER")
+        .ok()
+        .map(|value| value == "1")
+        .unwrap_or(false);
+
+    if verbose_render {
+        let output_size = fs::metadata(&output_path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+
+        println!(
+            "[PiDF] rendered page {} width {} -> {} ({} bytes)",
+            normalized_page,
+            normalized_width,
+            output_path.to_string_lossy(),
+            output_size
+        );
+    }
+
+    Ok(PdfRenderedPage {
+        image_path: output_path.to_string_lossy().into_owned(),
+        width: normalized_width as f32,
+        height: css_height,
+    })
+}
+
 fn run_pdf_worker(receiver: mpsc::Receiver<PdfWorkerRequest>) {
     let pdfium = match create_pdfium() {
         Ok(pdfium) => pdfium,
@@ -212,8 +295,18 @@ fn run_pdf_worker(receiver: mpsc::Receiver<PdfWorkerRequest>) {
     let mut sessions = HashMap::new();
     let mut session_paths: HashMap<String, String> = HashMap::new();
     let mut next_session_id: u64 = 1;
+    let mut deferred_requests: VecDeque<PdfWorkerRequest> = VecDeque::new();
 
-    for request in receiver {
+    loop {
+        let request = if let Some(deferred) = deferred_requests.pop_front() {
+            deferred
+        } else {
+            match receiver.recv() {
+                Ok(request) => request,
+                Err(_) => break,
+            }
+        };
+
         match request {
             PdfWorkerRequest::Open { path, response } => {
                 let result = (|| {
@@ -255,86 +348,69 @@ fn run_pdf_worker(receiver: mpsc::Receiver<PdfWorkerRequest>) {
                 target_width,
                 response,
             } => {
-                let result = (|| {
-                    let document = sessions
-                        .get(&session_id)
-                        .ok_or_else(|| "Unknown or closed PDF session.".to_owned())?;
+                let mut pending_renders = vec![PendingRenderRequest {
+                    session_id,
+                    page_number,
+                    target_width,
+                    response,
+                }];
 
-                    let path = session_paths
-                        .get(&session_id)
-                        .ok_or_else(|| "Missing PDF path for session.".to_owned())?;
+                loop {
+                    match receiver.try_recv() {
+                        Ok(PdfWorkerRequest::Render {
+                            session_id,
+                            page_number,
+                            target_width,
+                            response,
+                        }) => {
+                            pending_renders.push(PendingRenderRequest {
+                                session_id,
+                                page_number,
+                                target_width,
+                                response,
+                            });
+                        }
+                        Ok(other_request) => {
+                            deferred_requests.push_back(other_request);
+                        }
+                        Err(mpsc::TryRecvError::Empty) => break,
+                        Err(mpsc::TryRecvError::Disconnected) => break,
+                    }
+                }
 
-                    let page_count = document.pages().len() as u16;
-                    if page_count == 0 {
-                        return Err("PDF has no pages.".to_owned());
+                let mut latest_render_by_page: HashMap<(String, u16), usize> = HashMap::new();
+                let mut superseded = vec![false; pending_renders.len()];
+
+                for (index, pending) in pending_renders.iter().enumerate() {
+                    if let Some(previous) = latest_render_by_page
+                        .insert((pending.session_id.clone(), pending.page_number), index)
+                    {
+                        superseded[previous] = true;
+                    }
+                }
+
+                for (index, pending) in pending_renders.into_iter().enumerate() {
+                    if superseded[index] {
+                        let _ = pending
+                            .response
+                            .send(Err(RENDER_SUPERSEDED_ERROR.to_owned()));
+                        continue;
                     }
 
-                    let requested_page = page_number.max(1);
-                    let normalized_page = normalize_page_number(requested_page, page_count);
-                    let normalized_width = normalize_target_width(target_width);
-                    let output_path = render_cache_path(path, normalized_page, normalized_width)?;
+                    let result = (|| {
+                        let document = sessions
+                            .get(&pending.session_id)
+                            .ok_or_else(|| "Unknown or closed PDF session.".to_owned())?;
 
-                    if let Some(cached_page) = cached_render_response(&output_path, normalized_width)? {
-                        return Ok(cached_page);
-                    }
+                        let path = session_paths
+                            .get(&pending.session_id)
+                            .ok_or_else(|| "Missing PDF path for session.".to_owned())?;
 
-                    let page = document
-                        .pages()
-                        .get((normalized_page - 1) as u16)
-                        .map_err(|error| format!("Failed to access page {}: {error:?}", normalized_page))?;
+                        render_pdf_page(document, path, pending.page_number, pending.target_width)
+                    })();
 
-                    let base_width = page.width().value.max(1.0);
-                    let base_height = page.height().value.max(1.0);
-                    let scale = normalized_width as f32 / base_width;
-                    let css_height = (base_height * scale).max(1.0);
-
-                    let bitmap = page
-                        .render_with_config(
-                            &PdfRenderConfig::new()
-                                .set_target_width(normalized_width as i32)
-                                .rotate_if_landscape(PdfPageRenderRotation::None, true),
-                        )
-                        .map_err(|error| {
-                            format!("Failed to render page {}: {error:?}", normalized_page)
-                        })?;
-
-                    let image = bitmap.as_image();
-                    let temp_output_path = output_path.with_extension("tmp.jpg");
-
-                    image
-                        .save(&temp_output_path)
-                        .map_err(|error| format!("Failed to persist rendered page image: {error}"))?;
-
-                    fs::rename(&temp_output_path, &output_path)
-                        .map_err(|error| format!("Failed to finalize rendered page image: {error}"))?;
-
-                    let verbose_render = std::env::var("PIDF_VERBOSE_RENDER")
-                        .ok()
-                        .map(|value| value == "1")
-                        .unwrap_or(false);
-
-                    if verbose_render {
-                        let output_size = fs::metadata(&output_path)
-                            .map(|metadata| metadata.len())
-                            .unwrap_or(0);
-
-                        println!(
-                            "[PiDF] rendered page {} width {} -> {} ({} bytes)",
-                            normalized_page,
-                            normalized_width,
-                            output_path.to_string_lossy(),
-                            output_size
-                        );
-                    }
-
-                    Ok(PdfRenderedPage {
-                        image_path: output_path.to_string_lossy().into_owned(),
-                        width: normalized_width as f32,
-                        height: css_height,
-                    })
-                })();
-
-                let _ = response.send(result);
+                    let _ = pending.response.send(result);
+                }
             }
             PdfWorkerRequest::Close {
                 session_id,

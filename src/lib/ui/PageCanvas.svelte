@@ -63,6 +63,10 @@
     return { message: String(error) };
   }
 
+  function isRenderSupersededError(message: string): boolean {
+    return message.toLowerCase().includes("superseded");
+  }
+
   async function withTimeout<T>(
     promise: Promise<T>,
     timeoutMs: number,
@@ -259,6 +263,10 @@
       }
 
       const describedError = describeError(error);
+      if (isRenderSupersededError(describedError.message)) {
+        return;
+      }
+
       errorMessage = `Page ${pageNumber}: ${describedError.message}`;
 
       dispatch("rendererror", {
