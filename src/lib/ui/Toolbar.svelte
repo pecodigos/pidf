@@ -11,6 +11,7 @@
 
   const dispatch = createEventDispatcher<{
     open: void;
+    find: void;
     jump: { page: number };
     zoomin: void;
     zoomout: void;
@@ -53,6 +54,15 @@
       aria-label="Open PDF"
     >
       {loading ? "Opening..." : "Open PDF"}
+    </button>
+    <button
+      class="ghost"
+      on:click={() => dispatch("find")}
+      disabled={loading || pageCount <= 0}
+      title="Find or jump to page (Ctrl/Cmd+F)"
+      aria-label="Find or jump to page"
+    >
+      Find
     </button>
     <button
       class="ghost"

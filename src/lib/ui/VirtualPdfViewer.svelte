@@ -671,7 +671,7 @@
         <li><kbd>Ctrl/Cmd</kbd> + <kbd>-</kbd> Zoom out</li>
         <li><kbd>Ctrl/Cmd</kbd> + <kbd>0</kbd> Reset zoom</li>
         <li><kbd>F11</kbd> or <kbd>Ctrl/Cmd</kbd> + <kbd>Shift</kbd> + <kbd>F</kbd> Fullscreen</li>
-        <li><kbd>Ctrl/Cmd</kbd> + <kbd>F</kbd> Find (page jump)</li>
+        <li><kbd>Ctrl/Cmd</kbd> + <kbd>F</kbd> Open find panel (jump to page)</li>
       </ul>
     </div>
   {:else}

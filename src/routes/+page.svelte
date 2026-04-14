@@ -40,6 +40,9 @@
   let loading = false;
   let errorMessage = "";
   let showSidebar = false;
+  let showFindPanel = false;
+  let findPageField = "1";
+  let findPanelInput: HTMLInputElement | null = null;
   let activeOpenRequestId = 0;
   const appWindow = getCurrentWindow();
   const OPEN_PDF_TIMEOUT_MS = 45000;
@@ -143,20 +146,32 @@
     }
   }
 
-  function openFindShortcut(): void {
-    const response = window.prompt(
-      "Text search is not available in image mode yet. Enter a page number to jump:",
-      String($currentPage),
-    );
-
-    if (!response) {
+  function openFindPanel(): void {
+    if ($pageCount <= 0) {
       return;
     }
 
-    const parsedPage = Number.parseInt(response, 10);
-    if (Number.isFinite(parsedPage)) {
-      jumpToPage(parsedPage);
+    showFindPanel = true;
+    findPageField = String($currentPage);
+    window.requestAnimationFrame(() => {
+      findPanelInput?.focus();
+      findPanelInput?.select();
+    });
+  }
+
+  function closeFindPanel(): void {
+    showFindPanel = false;
+  }
+
+  function submitFindPanelJump(): void {
+    const parsedPage = Number.parseInt(findPageField, 10);
+    if (!Number.isFinite(parsedPage)) {
+      findPageField = String($currentPage);
+      return;
     }
+
+    jumpToPage(parsedPage);
+    closeFindPanel();
   }
 
   function monitorFirstRender(nextSession: PdfSession, selectedPath: string): void {
@@ -237,6 +252,7 @@
       fileName.set(extractFileName(selectedPath));
       setPageCount(nextSession.pageCount);
       setCurrentPage(1);
+      showFindPanel = false;
 
       monitorFirstRender(nextSession, selectedPath);
       void destroySessionSafely(previousSession);
@@ -348,7 +364,13 @@
 
       if (isFindShortcut(event)) {
         event.preventDefault();
-        openFindShortcut();
+        openFindPanel();
+        return;
+      }
+
+      if (showFindPanel && event.key === "Escape") {
+        event.preventDefault();
+        closeFindPanel();
         return;
       }
 
@@ -359,6 +381,10 @@
       }
 
       if (isEditableTarget(event.target)) {
+        return;
+      }
+
+      if (showFindPanel) {
         return;
       }
 
@@ -425,6 +451,7 @@
     {loading}
     {showSidebar}
     on:open={openPdf}
+    on:find={openFindPanel}
     on:jump={(event) => jumpToPage(event.detail.page)}
     on:zoomin={zoomIn}
     on:zoomout={zoomOut}
@@ -432,6 +459,42 @@
     on:togglesidebar={() => (showSidebar = !showSidebar)}
     on:toggletheme={toggleTheme}
   />
+
+  {#if showFindPanel}
+    <section class="find-panel" aria-label="Find and jump">
+      <div class="find-header">
+        <h2>Find</h2>
+        <button
+          type="button"
+          class="find-close"
+          on:click={closeFindPanel}
+          aria-label="Close find panel"
+        >
+          Close
+        </button>
+      </div>
+
+      <p class="find-hint">Text search is not available in image mode yet. Jump to a page instead.</p>
+
+      <form class="find-form" on:submit|preventDefault={submitFindPanelJump}>
+        <label class="find-field" for="find-page-input">
+          Page
+        </label>
+        <input
+          id="find-page-input"
+          bind:this={findPanelInput}
+          bind:value={findPageField}
+          type="number"
+          min="1"
+          max={Math.max(1, $pageCount)}
+          inputmode="numeric"
+          aria-label="Jump to page"
+        />
+
+        <button type="submit">Go</button>
+      </form>
+    </section>
+  {/if}
 
   <div class="workbench" class:with-sidebar={showSidebar}>
     {#if showSidebar}
@@ -509,6 +572,88 @@
     border-top: 1px solid color-mix(in oklab, var(--line) 40%, transparent);
   }
 
+  .find-panel {
+    position: fixed;
+    top: 4.35rem;
+    right: 1rem;
+    z-index: 40;
+    width: min(24rem, calc(100vw - 2rem));
+    border: 1px solid var(--line);
+    border-radius: 0.8rem;
+    background: var(--panel);
+    color: var(--text);
+    box-shadow: 0 20px 32px rgb(0 0 0 / 0.18);
+    padding: 0.85rem;
+    display: grid;
+    gap: 0.7rem;
+  }
+
+  .find-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+  }
+
+  .find-header h2 {
+    margin: 0;
+    font-size: 0.98rem;
+    letter-spacing: 0.01em;
+  }
+
+  .find-hint {
+    margin: 0;
+    color: var(--muted);
+    font-size: 0.86rem;
+    line-height: 1.35;
+  }
+
+  .find-form {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    gap: 0.55rem;
+    align-items: center;
+  }
+
+  .find-field {
+    font-size: 0.88rem;
+    color: var(--muted);
+  }
+
+  .find-form input,
+  .find-form button,
+  .find-close {
+    border: 1px solid var(--line);
+    border-radius: 0.6rem;
+    background: var(--panel-raised);
+    color: var(--text);
+    font: inherit;
+    min-height: 2.35rem;
+  }
+
+  .find-form input {
+    padding: 0 0.65rem;
+  }
+
+  .find-form button,
+  .find-close {
+    padding: 0 0.8rem;
+    cursor: pointer;
+  }
+
+  .find-form button:hover,
+  .find-close:hover {
+    border-color: color-mix(in oklab, var(--accent) 36%, var(--line));
+  }
+
+  .find-form button:focus-visible,
+  .find-form input:focus-visible,
+  .find-close:focus-visible {
+    outline: none;
+    border-color: color-mix(in oklab, var(--accent) 60%, var(--line));
+    box-shadow: 0 0 0 2px color-mix(in oklab, var(--accent) 28%, transparent);
+  }
+
   .workbench.with-sidebar {
     grid-template-columns: auto 1fr;
   }
@@ -523,6 +668,21 @@
   }
 
   @media (max-width: 860px) {
+    .find-panel {
+      top: 8rem;
+      left: 1rem;
+      right: 1rem;
+      width: auto;
+    }
+
+    .find-form {
+      grid-template-columns: 1fr;
+    }
+
+    .find-field {
+      display: none;
+    }
+
     .workbench {
       grid-template-columns: 1fr;
     }
