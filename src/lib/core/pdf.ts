@@ -12,6 +12,7 @@ const ENABLE_RENDER_DIAGNOSTICS = false;
 type PdfSourceMode = "tauri-pdfium";
 
 interface PdfOpenInfo {
+  sessionId: string;
   pageCount: number;
   firstPageWidth: number;
   firstPageHeight: number;
@@ -78,18 +79,18 @@ export class PdfSession {
   readonly pageCount: number;
   readonly diagnostics: PdfSessionDiagnostics;
 
-  #path: string;
+  #sessionId: string;
   #firstPageRatio: number;
   #renderCache = new Map<string, Promise<PdfRenderedPage>>();
   #destroyed = false;
 
   constructor(
-    path: string,
+    sessionId: string,
     pageCount: number,
     firstPageRatio: number,
     diagnostics: PdfSessionDiagnostics,
   ) {
-    this.#path = path;
+    this.#sessionId = sessionId;
     this.pageCount = pageCount;
     this.#firstPageRatio = firstPageRatio;
     this.diagnostics = diagnostics;
@@ -114,7 +115,7 @@ export class PdfSession {
 
     const next = withTimeout(
       invoke<PdfRenderedPagePayload>("pdf_render_page", {
-        path: this.#path,
+        sessionId: this.#sessionId,
         pageNumber: normalizedPage,
         targetWidth: normalizedWidth,
       }),
@@ -155,7 +156,18 @@ export class PdfSession {
   }
 
   async destroy(): Promise<void> {
+    if (this.#destroyed) {
+      return;
+    }
+
     this.#destroyed = true;
+
+    await invoke("pdf_close_session", {
+      sessionId: this.#sessionId,
+    }).catch(() => {
+      // Session cleanup is best-effort; the backend worker will drop sessions on app exit.
+    });
+
     this.#renderCache.clear();
   }
 }
@@ -232,10 +244,16 @@ export async function createPdfSession(path: string): Promise<PdfSession> {
     trace.log("open_ready", {
       sourceMode,
       pageCount,
+      sessionId: openInfo.sessionId,
       renderEngine: diagnostics.renderEngine,
     });
 
-    return new PdfSession(path, pageCount, firstPageHeight / firstPageWidth, diagnostics);
+    return new PdfSession(
+      openInfo.sessionId,
+      pageCount,
+      firstPageHeight / firstPageWidth,
+      diagnostics,
+    );
   } catch (error) {
     trace.log("open_failed", {
       sourceMode,

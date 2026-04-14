@@ -43,11 +43,6 @@ src-tauri/
 	src/lib.rs            # Rust commands: initial path + PDFium open/render stages
 	capabilities/default.json
 	tauri.conf.json
-
-static/
-	pdfjs/
-		cmaps/              # Legacy assets from previous PDF.js implementation
-		standard_fonts/     # Legacy assets from previous PDF.js implementation
 ```
 
 ## Development

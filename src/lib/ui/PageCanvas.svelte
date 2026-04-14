@@ -3,12 +3,12 @@
 
   import { cacheKey, type RenderCache } from "$lib/core/renderCache";
   import type { PdfSession } from "$lib/core/pdf";
+  import { currentPage as viewerCurrentPage } from "$lib/state/viewer";
   import { logPdfStage } from "$lib/core/trace";
 
   export let session: PdfSession;
   export let pageNumber: number;
   export let targetWidth = 900;
-  export let priority: "high" | "low" = "low";
   export let cache: RenderCache;
 
   const dispatch = createEventDispatcher<{
@@ -19,6 +19,7 @@
   const DEFAULT_RATIO = Math.SQRT2;
   const RENDER_TIMEOUT_MS = 12000;
   const INITIAL_RENDER_DEBOUNCE_MS = 40;
+  const VIEWPORT_PRIORITY_DISTANCE = 1;
   const HIGH_PRIORITY_RENDER_DEBOUNCE_MS = 16;
   const LOW_PRIORITY_RENDER_DEBOUNCE_MS = 260;
   const RESIZE_RENDER_DEBOUNCE_MS = 140;
@@ -289,11 +290,14 @@
       renderDebounce = null;
     }
 
+    const distance = Math.abs($viewerCurrentPage - pageNumber);
+    const isHighPriority = distance <= VIEWPORT_PRIORITY_DISTANCE;
+
     const debounceMs = imageUrl
       ? RESIZE_RENDER_DEBOUNCE_MS
       : pageNumber === 1
         ? 0
-        : priority === "high"
+        : isHighPriority
           ? HIGH_PRIORITY_RENDER_DEBOUNCE_MS
           : Math.max(INITIAL_RENDER_DEBOUNCE_MS, LOW_PRIORITY_RENDER_DEBOUNCE_MS);
     renderDebounce = setTimeout(() => {
@@ -302,7 +306,7 @@
     }, debounceMs);
   }
 
-  $: if (session && targetWidth > 0 && priority) {
+  $: if (session && targetWidth > 0 && $viewerCurrentPage >= 0) {
     scheduleRender();
   }
 

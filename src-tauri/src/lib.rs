@@ -1,11 +1,12 @@
 use image::image_dimensions;
 use pdfium_render::prelude::*;
 use serde::Serialize;
-use std::collections::hash_map::DefaultHasher;
+use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{mpsc, OnceLock};
+use std::thread;
 use std::time::UNIX_EPOCH;
 
 fn is_pdf_file(path: &str) -> bool {
@@ -34,11 +35,6 @@ fn verbose_runtime_logs_enabled() -> bool {
         .ok()
         .map(|value| value == "1")
         .unwrap_or(false)
-}
-
-fn render_lock() -> &'static Mutex<()> {
-    static RENDER_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    RENDER_LOCK.get_or_init(|| Mutex::new(()))
 }
 
 fn local_pdfium_library_candidates() -> Vec<PathBuf> {
@@ -150,6 +146,7 @@ fn render_cache_path(path: &str, page_number: u16, target_width: u16) -> Result<
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PdfOpenInfo {
+    session_id: String,
     page_count: u16,
     first_page_width: f32,
     first_page_height: f32,
@@ -162,6 +159,208 @@ struct PdfRenderedPage {
     image_path: String,
     width: f32,
     height: f32,
+}
+
+struct PdfSessionOpenResult {
+    session_id: String,
+    page_count: u16,
+    first_page_width: f32,
+    first_page_height: f32,
+}
+
+enum PdfWorkerRequest {
+    Open {
+        path: String,
+        response: mpsc::Sender<Result<PdfSessionOpenResult, String>>,
+    },
+    Render {
+        session_id: String,
+        page_number: u16,
+        target_width: u16,
+        response: mpsc::Sender<Result<PdfRenderedPage, String>>,
+    },
+    Close {
+        session_id: String,
+        response: mpsc::Sender<Result<(), String>>,
+    },
+}
+
+fn run_pdf_worker(receiver: mpsc::Receiver<PdfWorkerRequest>) {
+    let pdfium = match create_pdfium() {
+        Ok(pdfium) => pdfium,
+        Err(error) => {
+            let startup_error = format!("Failed to initialize PDF worker: {error}");
+
+            for request in receiver {
+                match request {
+                    PdfWorkerRequest::Open { response, .. } => {
+                        let _ = response.send(Err(startup_error.clone()));
+                    }
+                    PdfWorkerRequest::Render { response, .. } => {
+                        let _ = response.send(Err(startup_error.clone()));
+                    }
+                    PdfWorkerRequest::Close { response, .. } => {
+                        let _ = response.send(Err(startup_error.clone()));
+                    }
+                }
+            }
+
+            return;
+        }
+    };
+
+    let mut sessions = HashMap::new();
+    let mut session_paths: HashMap<String, String> = HashMap::new();
+    let mut next_session_id: u64 = 1;
+
+    for request in receiver {
+        match request {
+            PdfWorkerRequest::Open { path, response } => {
+                let result = (|| {
+                    ensure_pdf_path(&path)?;
+
+                    let document = pdfium
+                        .load_pdf_from_file(&path, None)
+                        .map_err(|error| format!("Failed to open PDF: {error:?}"))?;
+
+                    let page_count = document.pages().len() as u16;
+                    if page_count == 0 {
+                        return Err("PDF has no pages.".to_owned());
+                    }
+
+                    let first_page = document
+                        .pages()
+                        .get(0)
+                        .map_err(|error| format!("Failed to read first page: {error:?}"))?;
+
+                    let session_id = format!("s{}", next_session_id);
+                    next_session_id += 1;
+
+                    sessions.insert(session_id.clone(), document);
+                    session_paths.insert(session_id.clone(), path);
+
+                    Ok(PdfSessionOpenResult {
+                        session_id,
+                        page_count,
+                        first_page_width: first_page.width().value,
+                        first_page_height: first_page.height().value,
+                    })
+                })();
+
+                let _ = response.send(result);
+            }
+            PdfWorkerRequest::Render {
+                session_id,
+                page_number,
+                target_width,
+                response,
+            } => {
+                let result = (|| {
+                    let document = sessions
+                        .get(&session_id)
+                        .ok_or_else(|| "Unknown or closed PDF session.".to_owned())?;
+
+                    let path = session_paths
+                        .get(&session_id)
+                        .ok_or_else(|| "Missing PDF path for session.".to_owned())?;
+
+                    let page_count = document.pages().len() as u16;
+                    if page_count == 0 {
+                        return Err("PDF has no pages.".to_owned());
+                    }
+
+                    let requested_page = page_number.max(1);
+                    let normalized_page = normalize_page_number(requested_page, page_count);
+                    let normalized_width = normalize_target_width(target_width);
+                    let output_path = render_cache_path(path, normalized_page, normalized_width)?;
+
+                    if let Some(cached_page) = cached_render_response(&output_path, normalized_width)? {
+                        return Ok(cached_page);
+                    }
+
+                    let page = document
+                        .pages()
+                        .get((normalized_page - 1) as u16)
+                        .map_err(|error| format!("Failed to access page {}: {error:?}", normalized_page))?;
+
+                    let base_width = page.width().value.max(1.0);
+                    let base_height = page.height().value.max(1.0);
+                    let scale = normalized_width as f32 / base_width;
+                    let css_height = (base_height * scale).max(1.0);
+
+                    let bitmap = page
+                        .render_with_config(
+                            &PdfRenderConfig::new()
+                                .set_target_width(normalized_width as i32)
+                                .rotate_if_landscape(PdfPageRenderRotation::None, true),
+                        )
+                        .map_err(|error| {
+                            format!("Failed to render page {}: {error:?}", normalized_page)
+                        })?;
+
+                    let image = bitmap.as_image();
+                    let temp_output_path = output_path.with_extension("tmp.jpg");
+
+                    image
+                        .save(&temp_output_path)
+                        .map_err(|error| format!("Failed to persist rendered page image: {error}"))?;
+
+                    fs::rename(&temp_output_path, &output_path)
+                        .map_err(|error| format!("Failed to finalize rendered page image: {error}"))?;
+
+                    let verbose_render = std::env::var("PIDF_VERBOSE_RENDER")
+                        .ok()
+                        .map(|value| value == "1")
+                        .unwrap_or(false);
+
+                    if verbose_render {
+                        let output_size = fs::metadata(&output_path)
+                            .map(|metadata| metadata.len())
+                            .unwrap_or(0);
+
+                        println!(
+                            "[PiDF] rendered page {} width {} -> {} ({} bytes)",
+                            normalized_page,
+                            normalized_width,
+                            output_path.to_string_lossy(),
+                            output_size
+                        );
+                    }
+
+                    Ok(PdfRenderedPage {
+                        image_path: output_path.to_string_lossy().into_owned(),
+                        width: normalized_width as f32,
+                        height: css_height,
+                    })
+                })();
+
+                let _ = response.send(result);
+            }
+            PdfWorkerRequest::Close {
+                session_id,
+                response,
+            } => {
+                sessions.remove(&session_id);
+                session_paths.remove(&session_id);
+                let _ = response.send(Ok(()));
+            }
+        }
+    }
+}
+
+fn pdf_worker_sender() -> &'static mpsc::Sender<PdfWorkerRequest> {
+    static PDF_WORKER_SENDER: OnceLock<mpsc::Sender<PdfWorkerRequest>> = OnceLock::new();
+
+    PDF_WORKER_SENDER.get_or_init(|| {
+        let (sender, receiver) = mpsc::channel();
+
+        thread::Builder::new()
+            .name("pidf-pdf-worker".to_owned())
+            .spawn(move || run_pdf_worker(receiver))
+            .expect("failed to spawn PDF worker thread");
+
+        sender
+    })
 }
 
 fn cached_render_response(output_path: &Path, target_width: u16) -> Result<Option<PdfRenderedPage>, String> {
@@ -194,123 +393,64 @@ fn cached_render_response(output_path: &Path, target_width: u16) -> Result<Optio
 
 #[tauri::command]
 fn pdf_open_info(path: String) -> Result<PdfOpenInfo, String> {
-    ensure_pdf_path(&path)?;
+    let (response_sender, response_receiver) = mpsc::channel();
 
-    let pdfium = create_pdfium()?;
-    let document = pdfium
-        .load_pdf_from_file(&path, None)
-        .map_err(|error| format!("Failed to open PDF: {error:?}"))?;
+    pdf_worker_sender()
+        .send(PdfWorkerRequest::Open {
+            path,
+            response: response_sender,
+        })
+        .map_err(|_| "PDF worker is unavailable.".to_owned())?;
 
-    let page_count = document.pages().len() as u16;
-    if page_count == 0 {
-        return Err("PDF has no pages.".to_owned());
-    }
-
-    let first_page = document
-        .pages()
-        .get(0)
-        .map_err(|error| format!("Failed to read first page: {error:?}"))?;
+    let open_result = response_receiver
+        .recv()
+        .map_err(|_| "PDF worker did not respond.".to_owned())??;
 
     Ok(PdfOpenInfo {
-        page_count,
-        first_page_width: first_page.width().value,
-        first_page_height: first_page.height().value,
+        session_id: open_result.session_id,
+        page_count: open_result.page_count,
+        first_page_width: open_result.first_page_width,
+        first_page_height: open_result.first_page_height,
         render_engine: "pdfium-render",
     })
 }
 
 #[tauri::command]
-fn pdf_render_page(path: String, page_number: u16, target_width: u16) -> Result<PdfRenderedPage, String> {
-    ensure_pdf_path(&path)?;
+fn pdf_render_page(
+    session_id: String,
+    page_number: u16,
+    target_width: u16,
+) -> Result<PdfRenderedPage, String> {
+    let (response_sender, response_receiver) = mpsc::channel();
 
-    let requested_page = page_number.max(1);
-    let normalized_width = normalize_target_width(target_width);
-    let mut output_path = render_cache_path(&path, requested_page, normalized_width)?;
+    pdf_worker_sender()
+        .send(PdfWorkerRequest::Render {
+            session_id,
+            page_number,
+            target_width,
+            response: response_sender,
+        })
+        .map_err(|_| "PDF worker is unavailable.".to_owned())?;
 
-    if let Some(cached_page) = cached_render_response(&output_path, normalized_width)? {
-        return Ok(cached_page);
-    }
+    response_receiver
+        .recv()
+        .map_err(|_| "PDF worker did not respond.".to_owned())?
+}
 
-    let _guard = render_lock()
-        .lock()
-        .map_err(|_| "Render lock poisoned.".to_owned())?;
+#[tauri::command]
+fn pdf_close_session(session_id: String) -> Result<(), String> {
+    let (response_sender, response_receiver) = mpsc::channel();
 
-    if let Some(cached_page) = cached_render_response(&output_path, normalized_width)? {
-        return Ok(cached_page);
-    }
+    pdf_worker_sender()
+        .send(PdfWorkerRequest::Close {
+            session_id,
+            response: response_sender,
+        })
+        .map_err(|_| "PDF worker is unavailable.".to_owned())?;
 
-    let pdfium = create_pdfium()?;
-    let document = pdfium
-        .load_pdf_from_file(&path, None)
-        .map_err(|error| format!("Failed to open PDF for rendering: {error:?}"))?;
-
-    let page_count = document.pages().len() as u16;
-    if page_count == 0 {
-        return Err("PDF has no pages.".to_owned());
-    }
-
-    let normalized_page = normalize_page_number(requested_page, page_count);
-
-    if normalized_page != requested_page {
-        output_path = render_cache_path(&path, normalized_page, normalized_width)?;
-
-        if let Some(cached_page) = cached_render_response(&output_path, normalized_width)? {
-            return Ok(cached_page);
-        }
-    }
-
-    let page = document
-        .pages()
-        .get((normalized_page - 1) as u16)
-        .map_err(|error| format!("Failed to access page {}: {error:?}", normalized_page))?;
-
-    let base_width = page.width().value.max(1.0);
-    let base_height = page.height().value.max(1.0);
-    let scale = normalized_width as f32 / base_width;
-    let css_height = (base_height * scale).max(1.0);
-
-    let bitmap = page
-        .render_with_config(
-            &PdfRenderConfig::new()
-                .set_target_width(normalized_width as i32)
-                .rotate_if_landscape(PdfPageRenderRotation::None, true),
-        )
-        .map_err(|error| format!("Failed to render page {}: {error:?}", normalized_page))?;
-
-    let image = bitmap.as_image();
-    let temp_output_path = output_path.with_extension("tmp.jpg");
-
-    image
-        .save(&temp_output_path)
-        .map_err(|error| format!("Failed to persist rendered page image: {error}"))?;
-
-    fs::rename(&temp_output_path, &output_path)
-        .map_err(|error| format!("Failed to finalize rendered page image: {error}"))?;
-
-    let verbose_render = std::env::var("PIDF_VERBOSE_RENDER")
-        .ok()
-        .map(|value| value == "1")
-        .unwrap_or(false);
-
-    if verbose_render {
-        let output_size = fs::metadata(&output_path)
-            .map(|metadata| metadata.len())
-            .unwrap_or(0);
-
-        println!(
-            "[PiDF] rendered page {} width {} -> {} ({} bytes)",
-            normalized_page,
-            normalized_width,
-            output_path.to_string_lossy(),
-            output_size
-        );
-    }
-
-    Ok(PdfRenderedPage {
-        image_path: output_path.to_string_lossy().into_owned(),
-        width: normalized_width as f32,
-        height: css_height,
-    })
+    response_receiver
+        .recv()
+        .map_err(|_| "PDF worker did not respond.".to_owned())?
 }
 
 #[tauri::command]
@@ -349,6 +489,7 @@ pub fn run() {
         initial_pdf_path,
         pdf_open_info,
         pdf_render_page,
+        pdf_close_session,
         trace_pdf_stage
     ])
         .run(tauri::generate_context!())
