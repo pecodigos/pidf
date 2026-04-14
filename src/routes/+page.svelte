@@ -45,6 +45,7 @@
   const OPEN_PDF_TIMEOUT_MS = 45000;
   const FIRST_RENDER_TIMEOUT_MS = 12000;
   const SESSION_DESTROY_TIMEOUT_MS = 5000;
+  const THEME_STORAGE_KEY = "pidf.theme";
 
   type PendingFirstRender = {
     attemptId: string;
@@ -53,6 +54,41 @@
   };
 
   let pendingFirstRender: PendingFirstRender | null = null;
+
+  function readStoredThemePreference(): boolean | null {
+    try {
+      const storedValue = window.localStorage.getItem(THEME_STORAGE_KEY);
+      if (storedValue === "dark") {
+        return true;
+      }
+
+      if (storedValue === "light") {
+        return false;
+      }
+    } catch (error) {
+      console.warn("[PiDF] failed to read stored theme preference", error);
+    }
+
+    return null;
+  }
+
+  function persistThemePreference(nextIsDark: boolean): void {
+    try {
+      window.localStorage.setItem(THEME_STORAGE_KEY, nextIsDark ? "dark" : "light");
+    } catch (error) {
+      console.warn("[PiDF] failed to persist theme preference", error);
+    }
+  }
+
+  function applyInitialThemePreference(): void {
+    const storedPreference = readStoredThemePreference();
+    if (storedPreference !== null) {
+      darkMode.set(storedPreference);
+      return;
+    }
+
+    darkMode.set(window.matchMedia("(prefers-color-scheme: dark)").matches);
+  }
 
   function extractFileName(path: string): string {
     const parts = path.split(/[\\/]/);
@@ -109,7 +145,7 @@
 
   function openFindShortcut(): void {
     const response = window.prompt(
-      "Find text is not available in image mode yet. Enter a page number to jump:",
+      "Text search is not available in image mode yet. Enter a page number to jump:",
       String($currentPage),
     );
 
@@ -240,7 +276,6 @@
 
     const selectedPath = await open({
       title: "Open PDF",
-      defaultPath: "/home/pepe/Documents",
       directory: false,
       multiple: false,
       filters: [{ name: "PDF", extensions: ["pdf"] }],
@@ -264,7 +299,11 @@
   }
 
   function toggleTheme(): void {
-    darkMode.update((value) => !value);
+    darkMode.update((value) => {
+      const nextValue = !value;
+      persistThemePreference(nextValue);
+      return nextValue;
+    });
   }
 
   function handleViewerPageChange(event: CustomEvent<{ page: number }>): void {
@@ -298,8 +337,7 @@
   }
 
   onMount(() => {
-    const prefersDarkMode = window.matchMedia("(prefers-color-scheme: dark)").matches;
-    darkMode.set(prefersDarkMode);
+    applyInitialThemePreference();
 
     const onWindowKeydown = (event: KeyboardEvent) => {
       if (isOpenShortcut(event)) {
@@ -377,12 +415,13 @@
   });
 </script>
 
-<div class="app" class:dark={$darkMode}>
+<main class="app" class:dark={$darkMode} aria-busy={loading}>
   <Toolbar
     fileName={$fileName}
     currentPage={$currentPage}
     pageCount={$pageCount}
     zoom={$zoom}
+    themeDark={$darkMode}
     {loading}
     {showSidebar}
     on:open={openPdf}
@@ -419,7 +458,7 @@
       {errorMessage}
     </div>
   {/if}
-</div>
+</main>
 
 <style>
   :global(html),

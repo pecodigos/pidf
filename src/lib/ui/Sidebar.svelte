@@ -51,7 +51,7 @@
 
 <style>
   .sidebar {
-    width: 5.2rem;
+    width: 6.2rem;
     border-right: 1px solid var(--line);
     background: var(--panel);
     display: grid;
@@ -63,7 +63,7 @@
     border-bottom: 1px solid var(--line);
     padding: 0.6rem;
     color: var(--muted);
-    font-size: 0.73rem;
+    font-size: 0.78rem;
     line-height: 1.25;
   }
 
@@ -80,13 +80,23 @@
   }
 
   button {
-    height: 1.8rem;
+    min-height: 2.75rem;
     border: 1px solid var(--line);
     border-radius: 0.55rem;
     background: var(--panel-raised);
     color: var(--muted);
     cursor: pointer;
-    font-size: 0.78rem;
+    font-size: 0.86rem;
+  }
+
+  button:hover {
+    border-color: color-mix(in oklab, var(--accent) 32%, var(--line));
+  }
+
+  button:focus-visible {
+    outline: none;
+    border-color: color-mix(in oklab, var(--accent) 60%, var(--line));
+    box-shadow: 0 0 0 2px color-mix(in oklab, var(--accent) 28%, transparent);
   }
 
   button.selected {
