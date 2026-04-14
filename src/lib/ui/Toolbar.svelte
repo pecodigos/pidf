@@ -47,7 +47,16 @@
 
 <header class="toolbar" role="toolbar" aria-label="PDF controls">
   <div class="toolbar-shell">
-    <div class="group group-primary">
+    <div class="left-actions">
+      <button
+        class="btn icon rail"
+        on:click={() => dispatch("togglesidebar")}
+        aria-pressed={showSidebar}
+        title={showSidebar ? "Hide page rail" : "Show page rail"}
+        aria-label={showSidebar ? "Hide page rail" : "Show page rail"}
+      >
+        <span class="rail-glyph" aria-hidden="true"></span>
+      </button>
       <button
         class="btn"
         on:click={() => dispatch("open")}
@@ -56,23 +65,6 @@
         aria-label="Open PDF"
       >
         {loading ? "Opening..." : "Open"}
-      </button>
-      <button
-        class="btn"
-        on:click={() => dispatch("find")}
-        disabled={loading || pageCount <= 0}
-        title="Find or jump to page (Ctrl/Cmd+F)"
-        aria-label="Find or jump to page"
-      >
-        Find
-      </button>
-      <button
-        class="btn"
-        on:click={() => dispatch("togglesidebar")}
-        aria-pressed={showSidebar}
-        title={showSidebar ? "Hide page rail" : "Show page rail"}
-      >
-        {showSidebar ? "Rail On" : "Rail Off"}
       </button>
     </div>
 
@@ -87,7 +79,17 @@
       </p>
     </div>
 
-    <div class="group group-view">
+    <div class="right-actions">
+      <button
+        class="btn"
+        on:click={() => dispatch("find")}
+        disabled={loading || pageCount <= 0}
+        title="Find or jump to page (Ctrl/Cmd+F)"
+        aria-label="Find or jump to page"
+      >
+        Find
+      </button>
+
       <div class="zoom-group" aria-label="Zoom controls">
         <button
           class="btn icon"
@@ -176,18 +178,15 @@
     padding: 0.52rem 0.75rem;
   }
 
-  .group {
+  .left-actions,
+  .right-actions {
     display: inline-flex;
     align-items: center;
     gap: 0.35rem;
-    padding: 0.24rem;
-    border: 1px solid color-mix(in oklab, var(--line) 76%, transparent);
-    background: color-mix(in oklab, var(--panel-raised) 88%, var(--bg));
-    border-radius: 0.82rem;
     min-width: 0;
   }
 
-  .group-view {
+  .right-actions {
     justify-self: end;
   }
 
@@ -270,6 +269,20 @@
     font-size: 1.05rem;
   }
 
+  .rail {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .rail-glyph {
+    width: 0.92rem;
+    height: 2px;
+    border-radius: 2px;
+    background: currentColor;
+    box-shadow: 0 -5px 0 currentColor, 0 5px 0 currentColor;
+  }
+
   .zoom {
     min-width: 4.6rem;
     font-variant-numeric: tabular-nums;
@@ -343,13 +356,14 @@
       gap: 0.42rem;
     }
 
-    .group {
+    .left-actions,
+    .right-actions {
       width: 100%;
       justify-content: flex-start;
       flex-wrap: wrap;
     }
 
-    .group-view {
+    .right-actions {
       justify-self: stretch;
     }
 
