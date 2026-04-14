@@ -39,9 +39,17 @@
   const DEFAULT_RATIO = Math.SQRT2;
   const ACTIVE_PAGES_BEFORE = 1;
   const ACTIVE_PAGES_AFTER = 2;
-  const RENDER_PAGES_BEFORE = 10;
-  const RENDER_PAGES_AFTER = 14;
+  // Adaptive prefetch window constants
+  let RENDER_PAGES_BEFORE = 10;
+  let RENDER_PAGES_AFTER = 14;
   const RENDER_WINDOW_SHIFT_MARGIN = 4;
+  const PREFETCH_MIN = 4;
+  const PREFETCH_MAX = 32;
+  const PREFETCH_BASE = 10;
+  const PREFETCH_VELOCITY_SCALE = 0.12; // Higher = more aggressive expansion
+  let lastScrollTop = 0;
+  let lastScrollTime = Date.now();
+  let lastScrollDirection = 1; // 1 = down, -1 = up
   const RESIZE_COMMIT_MS = 180;
   const TARGET_WIDTH_STEP = 64;
   const MIN_RENDER_WIDTH = 240;
@@ -107,6 +115,28 @@
   }
 
   function updateRenderedWindow(centerPage: number): void {
+    // Dynamically adjust prefetch window based on scroll velocity
+    const now = Date.now();
+    let velocity = 0;
+    if (container) {
+      const deltaPx = Math.abs(container.scrollTop - lastScrollTop);
+      const deltaT = Math.max(1, now - lastScrollTime);
+      velocity = deltaPx / deltaT; // px/ms
+      // Direction: positive = down, negative = up
+      lastScrollDirection = container.scrollTop > lastScrollTop ? 1 : -1;
+      lastScrollTop = container.scrollTop;
+      lastScrollTime = now;
+    }
+    // Prefetch window grows with velocity, shrinks when slow
+    const dynamicWindow = Math.min(PREFETCH_MAX, Math.max(PREFETCH_MIN, Math.round(PREFETCH_BASE + velocity * 1000 * PREFETCH_VELOCITY_SCALE)));
+    // Bias more pages in scroll direction
+    if (lastScrollDirection > 0) {
+      RENDER_PAGES_BEFORE = Math.floor(dynamicWindow * 0.6);
+      RENDER_PAGES_AFTER = Math.floor(dynamicWindow * 1.2);
+    } else {
+      RENDER_PAGES_BEFORE = Math.floor(dynamicWindow * 1.2);
+      RENDER_PAGES_AFTER = Math.floor(dynamicWindow * 0.6);
+    }
     if (pageCount <= 0) {
       renderWindowStart = 1;
       renderWindowEnd = 0;

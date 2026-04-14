@@ -142,104 +142,95 @@
       return;
     }
 
-    const renderWidth = Math.max(1, Math.round(targetWidth));
-    const currentKey = cacheKey(pageNumber, renderWidth);
-    if (currentKey === lastRenderKey && !errorMessage) {
+    // Quality ladder: low-res first, then high-res
+    const highResWidth = Math.max(1, Math.round(targetWidth));
+    const lowResWidth = Math.max(1, Math.round(targetWidth / 3));
+    const highResKey = cacheKey(pageNumber, highResWidth);
+    const lowResKey = cacheKey(pageNumber, lowResWidth);
+    if (highResKey === lastRenderKey && !errorMessage) {
       return;
     }
 
     const renderId = ++activeRenderId;
     errorMessage = "";
 
-    cssWidth = renderWidth;
-    cssHeight = Math.max(120, renderWidth * DEFAULT_RATIO);
+    // Try low-res first if not already showing high-res
+    let didShowLowRes = false;
+    const tryShowLowRes = () => {
+      const cachedLow = cache.get(lowResKey);
+      if (cachedLow && lastRenderKey !== highResKey) {
+        setDisplayedImageUrl(cachedLow.imageUrl);
+        cssWidth = cachedLow.cssWidth;
+        cssHeight = cachedLow.cssHeight;
+        didShowLowRes = true;
+      }
+    };
+    tryShowLowRes();
+
+    cssWidth = highResWidth;
+    cssHeight = Math.max(120, highResWidth * DEFAULT_RATIO);
 
     try {
-      const cachedEntry = cache.get(currentKey);
-      if (cachedEntry) {
+      // If high-res is cached, use it immediately
+      const cachedHigh = cache.get(highResKey);
+      if (cachedHigh) {
         logRenderStage("page_render_cache_hit", {
-          targetWidth: renderWidth,
+          targetWidth: highResWidth,
         });
-
         if (renderId !== activeRenderId) {
           return;
         }
-
         attemptedFallbackForUrl = "";
-        setDisplayedImageUrl(cachedEntry.imageUrl);
-        cssWidth = cachedEntry.cssWidth;
-        cssHeight = cachedEntry.cssHeight;
-
-        dispatch("rendercommitted", {
-          pageNumber,
-        });
-
-        lastRenderKey = currentKey;
+        setDisplayedImageUrl(cachedHigh.imageUrl);
+        cssWidth = cachedHigh.cssWidth;
+        cssHeight = cachedHigh.cssHeight;
+        dispatch("rendercommitted", { pageNumber });
+        lastRenderKey = highResKey;
         return;
       }
 
-      if (ENABLE_PAGE_DIAGNOSTICS) {
-        console.info("[PiDF] page render started", {
-          pageNumber,
-          targetWidth: renderWidth,
-          renderEngine: session.diagnostics.renderEngine,
+      // If not, render low-res immediately if not already shown
+      if (!didShowLowRes) {
+        // Only render low-res if not already showing it
+        const renderedLow = await withTimeout(
+          session.renderPage(pageNumber, lowResWidth, 0),
+          RENDER_TIMEOUT_MS,
+          `Backend page render timed out after ${RENDER_TIMEOUT_MS}ms (low-res).`,
+        );
+        if (renderId !== activeRenderId) return;
+        setDisplayedImageUrl(renderedLow.imageUrl);
+        cssWidth = renderedLow.cssWidth;
+        cssHeight = renderedLow.cssHeight;
+        cache.set(lowResKey, {
+          imageUrl: renderedLow.imageUrl,
+          cssWidth: renderedLow.cssWidth,
+          cssHeight: renderedLow.cssHeight,
         });
       }
 
-      logRenderStage("page_render_start", {
-        targetWidth: renderWidth,
-      });
+      // Schedule high-res render after a short delay (settle)
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      if (renderId !== activeRenderId) return;
 
-      const renderPriority = Math.min(4096, Math.abs(currentPage - pageNumber));
-
-      const rendered = await withTimeout(
-        session.renderPage(pageNumber, renderWidth, renderPriority),
+      const renderedHigh = await withTimeout(
+        session.renderPage(pageNumber, highResWidth, 0),
         RENDER_TIMEOUT_MS,
-        `Backend page render timed out after ${RENDER_TIMEOUT_MS}ms.`,
+        `Backend page render timed out after ${RENDER_TIMEOUT_MS}ms (high-res).`,
       );
-
-      if (ENABLE_PAGE_DIAGNOSTICS) {
-        console.info("[PiDF] page render payload", {
-          pageNumber,
-          imageUrl: rendered.imageUrl,
-          width: rendered.cssWidth,
-          height: rendered.cssHeight,
-        });
-      }
-
-      if (renderId !== activeRenderId) {
-        return;
-      }
-
-      attemptedFallbackForUrl = "";
-      setDisplayedImageUrl(rendered.imageUrl);
-      cssWidth = rendered.cssWidth;
-      cssHeight = rendered.cssHeight;
-
-      cache.set(currentKey, {
-        imageUrl: rendered.imageUrl,
-        cssWidth,
-        cssHeight,
+      if (renderId !== activeRenderId) return;
+      setDisplayedImageUrl(renderedHigh.imageUrl);
+      cssWidth = renderedHigh.cssWidth;
+      cssHeight = renderedHigh.cssHeight;
+      cache.set(highResKey, {
+        imageUrl: renderedHigh.imageUrl,
+        cssWidth: renderedHigh.cssWidth,
+        cssHeight: renderedHigh.cssHeight,
       });
+      dispatch("rendercommitted", { pageNumber });
+      lastRenderKey = highResKey;
+      return;
 
-      dispatch("rendercommitted", {
-        pageNumber,
-      });
-
-      logRenderStage("page_render_committed", {
-        targetWidth: renderWidth,
-      });
-
-      if (ENABLE_PAGE_DIAGNOSTICS) {
-        console.info("[PiDF] page render committed", {
-          pageNumber,
-          imageUrl,
-          width: cssWidth,
-          height: cssHeight,
-        });
-      }
-
-      lastRenderKey = currentKey;
+      // (Old single-pass logic removed; diagnostics for quality ladder below)
     } catch (error) {
       if (renderId !== activeRenderId) {
         return;
@@ -258,13 +249,13 @@
       });
 
       logRenderStage("page_render_failed", {
-        targetWidth: renderWidth,
+        targetWidth: highResWidth,
         message: describedError.message,
       });
 
       console.error("[PiDF] page render failed", {
         pageNumber,
-        targetWidth: renderWidth,
+        targetWidth: highResWidth,
         imageUrl,
         error: describedError,
       });
