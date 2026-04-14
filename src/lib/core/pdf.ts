@@ -96,7 +96,11 @@ export class PdfSession {
     this.diagnostics = diagnostics;
   }
 
-  async renderPage(pageNumber: number, targetWidth: number): Promise<PdfRenderedPage> {
+  async renderPage(
+    pageNumber: number,
+    targetWidth: number,
+    renderPriority = 100,
+  ): Promise<PdfRenderedPage> {
     if (this.#destroyed) {
       throw new Error("PDF session was already destroyed.");
     }
@@ -106,6 +110,7 @@ export class PdfSession {
       Math.min(this.pageCount, Math.floor(pageNumber)),
     );
     const normalizedWidth = normalizeTargetWidth(targetWidth);
+    const normalizedPriority = Math.max(0, Math.min(4096, Math.floor(renderPriority || 0)));
     const cacheKey = `${normalizedPage}:${normalizedWidth}`;
 
     const existing = this.#renderCache.get(cacheKey);
@@ -118,6 +123,7 @@ export class PdfSession {
         sessionId: this.#sessionId,
         pageNumber: normalizedPage,
         targetWidth: normalizedWidth,
+        renderPriority: normalizedPriority,
       }),
       PAGE_RENDER_TIMEOUT_MS,
       `PDF render timed out after ${PAGE_RENDER_TIMEOUT_MS}ms (page ${normalizedPage}).`,

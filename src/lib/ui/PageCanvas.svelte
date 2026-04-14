@@ -210,8 +210,10 @@
         targetWidth: renderWidth,
       });
 
+      const renderPriority = Math.min(4096, Math.abs($viewerCurrentPage - pageNumber));
+
       const rendered = await withTimeout(
-        session.renderPage(pageNumber, renderWidth),
+        session.renderPage(pageNumber, renderWidth, renderPriority),
         RENDER_TIMEOUT_MS,
         `Backend page render timed out after ${RENDER_TIMEOUT_MS}ms.`,
       );

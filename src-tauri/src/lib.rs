@@ -30,6 +30,10 @@ fn normalize_target_width(target_width: u16) -> u16 {
     target_width.max(240).min(2200)
 }
 
+fn normalize_render_priority(render_priority: Option<u16>) -> u16 {
+    render_priority.unwrap_or(100).min(4096)
+}
+
 fn verbose_runtime_logs_enabled() -> bool {
     std::env::var("PIDF_VERBOSE_LOGS")
         .ok()
@@ -177,6 +181,7 @@ enum PdfWorkerRequest {
         session_id: String,
         page_number: u16,
         target_width: u16,
+        render_priority: u16,
         response: mpsc::Sender<Result<PdfRenderedPage, String>>,
     },
     Close {
@@ -191,6 +196,7 @@ struct PendingRenderRequest {
     session_id: String,
     page_number: u16,
     target_width: u16,
+    render_priority: u16,
     response: mpsc::Sender<Result<PdfRenderedPage, String>>,
 }
 
@@ -346,12 +352,14 @@ fn run_pdf_worker(receiver: mpsc::Receiver<PdfWorkerRequest>) {
                 session_id,
                 page_number,
                 target_width,
+                render_priority,
                 response,
             } => {
                 let mut pending_renders = vec![PendingRenderRequest {
                     session_id,
                     page_number,
                     target_width,
+                    render_priority,
                     response,
                 }];
 
@@ -361,12 +369,14 @@ fn run_pdf_worker(receiver: mpsc::Receiver<PdfWorkerRequest>) {
                             session_id,
                             page_number,
                             target_width,
+                            render_priority,
                             response,
                         }) => {
                             pending_renders.push(PendingRenderRequest {
                                 session_id,
                                 page_number,
                                 target_width,
+                                render_priority,
                                 response,
                             });
                         }
@@ -389,13 +399,27 @@ fn run_pdf_worker(receiver: mpsc::Receiver<PdfWorkerRequest>) {
                     }
                 }
 
-                for (index, pending) in pending_renders.into_iter().enumerate() {
+                for (index, pending) in pending_renders.iter().enumerate() {
                     if superseded[index] {
-                        let _ = pending
-                            .response
-                            .send(Err(RENDER_SUPERSEDED_ERROR.to_owned()));
-                        continue;
+                        let _ = pending.response.send(Err(RENDER_SUPERSEDED_ERROR.to_owned()));
                     }
+                }
+
+                let mut execution_order: Vec<usize> = (0..pending_renders.len())
+                    .filter(|index| !superseded[*index])
+                    .collect();
+
+                execution_order.sort_by(|left_index, right_index| {
+                    let left = &pending_renders[*left_index];
+                    let right = &pending_renders[*right_index];
+
+                    left.render_priority
+                        .cmp(&right.render_priority)
+                        .then_with(|| left_index.cmp(right_index))
+                });
+
+                for index in execution_order {
+                    let pending = &pending_renders[index];
 
                     let result = (|| {
                         let document = sessions
@@ -496,6 +520,7 @@ fn pdf_render_page(
     session_id: String,
     page_number: u16,
     target_width: u16,
+    render_priority: Option<u16>,
 ) -> Result<PdfRenderedPage, String> {
     let (response_sender, response_receiver) = mpsc::channel();
 
@@ -504,6 +529,7 @@ fn pdf_render_page(
             session_id,
             page_number,
             target_width,
+            render_priority: normalize_render_priority(render_priority),
             response: response_sender,
         })
         .map_err(|_| "PDF worker is unavailable.".to_owned())?;
