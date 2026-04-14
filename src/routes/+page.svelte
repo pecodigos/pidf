@@ -40,6 +40,8 @@
   let loading = false;
   let errorMessage = "";
   let errorDetails = "";
+  let statusMessage = "";
+  let copyFeedback = "";
   let showSidebar = false;
   let showFindPanel = false;
   let findPageField = "1";
@@ -59,6 +61,30 @@
   };
 
   let pendingFirstRender: PendingFirstRender | null = null;
+  let copyFeedbackTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function setStatusMessage(message: string): void {
+    statusMessage = message;
+  }
+
+  function clearCopyFeedbackTimer(): void {
+    if (!copyFeedbackTimer) {
+      return;
+    }
+
+    clearTimeout(copyFeedbackTimer);
+    copyFeedbackTimer = null;
+  }
+
+  function showCopyFeedback(message: string): void {
+    clearCopyFeedbackTimer();
+    copyFeedback = message;
+
+    copyFeedbackTimer = setTimeout(() => {
+      copyFeedback = "";
+      copyFeedbackTimer = null;
+    }, 1800);
+  }
 
   function readStoredThemePreference(): boolean | null {
     try {
@@ -214,6 +240,7 @@
         const message = error instanceof Error ? error.message : String(error);
         errorMessage = `Opened PDF but first page failed to render. ${message} Try reopening the file.`;
         errorDetails = `Path: ${selectedPath}\nOpen attempt: ${attemptId}\nError: ${message}`;
+        setStatusMessage("Opened PDF, but first page render failed.");
 
         logPdfStage("ui_open_failed", {
           path: selectedPath,
@@ -230,6 +257,8 @@
     loading = true;
     errorMessage = "";
     errorDetails = "";
+    copyFeedback = "";
+    setStatusMessage("Opening PDF...");
 
     console.info("[PiDF] opening selected PDF", { path: selectedPath });
 
@@ -258,6 +287,7 @@
       setPageCount(nextSession.pageCount);
       setCurrentPage(1);
       showFindPanel = false;
+      setStatusMessage(`Opened ${extractFileName(selectedPath)}.`);
 
       monitorFirstRender(nextSession, selectedPath);
       void destroySessionSafely(previousSession);
@@ -279,6 +309,7 @@
 
       errorMessage = `Unable to open PDF. ${message} Check that the file is readable and try again.`;
       errorDetails = `Path: ${selectedPath}\nError: ${message}`;
+      setStatusMessage("Unable to open PDF.");
       logPdfStage("ui_open_failed", {
         path: selectedPath,
         openAttemptId: nextSession?.diagnostics.openAttemptId ?? null,
@@ -325,8 +356,10 @@
 
     try {
       await navigator.clipboard.writeText(errorDetails);
+      showCopyFeedback("Copied details.");
     } catch (error) {
       console.warn("[PiDF] failed to copy error details", error);
+      showCopyFeedback("Copy failed.");
     }
   }
 
@@ -466,12 +499,15 @@
   });
 
   onDestroy(() => {
+    clearCopyFeedbackTimer();
     pendingFirstRender = null;
     void destroySessionSafely(session);
   });
 </script>
 
 <main class="app" class:dark={$darkMode} aria-busy={loading}>
+  <p class="sr-only" role="status" aria-live="polite">{loading ? "Opening PDF..." : statusMessage}</p>
+
   <Toolbar
     fileName={$fileName}
     currentPage={$currentPage}
@@ -555,6 +591,9 @@
         </button>
         <button on:click={() => void openPdf()} disabled={loading}>Open Another PDF</button>
         <button on:click={() => void copyErrorDetails()} disabled={!errorDetails}>Copy Details</button>
+        {#if copyFeedback}
+          <span class="error-feedback" role="status" aria-live="polite">{copyFeedback}</span>
+        {/if}
       </div>
     </div>
   {/if}
@@ -623,6 +662,19 @@
     padding: 0.85rem;
     display: grid;
     gap: 0.7rem;
+    animation: find-panel-enter 140ms ease-out;
+  }
+
+  @keyframes find-panel-enter {
+    from {
+      opacity: 0;
+      transform: translateY(-6px) scale(0.985);
+    }
+
+    to {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
   }
 
   .find-header {
@@ -676,6 +728,7 @@
   .find-close {
     padding: 0 0.8rem;
     cursor: pointer;
+    transition: border-color 120ms ease, box-shadow 120ms ease, background-color 120ms ease;
   }
 
   .find-form button:hover,
@@ -726,6 +779,7 @@
     min-height: 2rem;
     padding: 0 0.75rem;
     cursor: pointer;
+    transition: background-color 120ms ease, box-shadow 120ms ease;
   }
 
   .error-actions button:hover:not(:disabled) {
@@ -740,6 +794,37 @@
   .error-actions button:disabled {
     opacity: 0.6;
     cursor: not-allowed;
+  }
+
+  .error-feedback {
+    align-self: center;
+    font-size: 0.8rem;
+    color: #ffd6da;
+    margin-left: 0.25rem;
+  }
+
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .find-panel {
+      animation: none;
+    }
+
+    .find-form button,
+    .find-close,
+    .error-actions button {
+      transition: none;
+    }
   }
 
   @media (max-width: 860px) {
