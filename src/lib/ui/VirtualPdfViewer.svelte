@@ -3,6 +3,23 @@
   import { createEventDispatcher, onDestroy, onMount, tick } from "svelte";
 
   import type { PdfSession } from "$lib/core/pdf";
+  import {
+    buildPageOffsets,
+    calculateTargetPageWidth,
+    estimatePageHeight,
+    getPageStartOffset,
+    resolvePageFromOffset,
+  } from "$lib/ui/viewerLayout";
+  import {
+    isEditableTarget,
+    isEndShortcut,
+    isHomeShortcut,
+    isPageDownShortcut,
+    isPageUpShortcut,
+    isViewerZoomInShortcut,
+    isViewerZoomOutShortcut,
+    isZoomResetShortcut,
+  } from "$lib/core/keyboard";
   import { RenderCache } from "$lib/core/renderCache";
   import { logPdfStage } from "$lib/core/trace";
   import { clampZoom, ZOOM_STEP } from "$lib/state/viewer";
@@ -64,30 +81,8 @@
 
   const renderCache = new RenderCache(24);
 
-  function calculateTargetPageWidth(
-    width: number,
-    height: number,
-    zoomLevel: number,
-    ratio: number,
-  ): number {
-    const measuredWidth = width > 0 ? width : browser ? window.innerWidth : 960;
-    const measuredHeight = height > 0 ? height : browser ? window.innerHeight : 720;
-    const availableWidth = Math.max(MIN_RENDER_WIDTH, measuredWidth - 48);
-    const availableHeight = Math.max(180, measuredHeight - PAGE_FIT_PADDING);
-    const safeRatio = ratio > 0 ? ratio : DEFAULT_RATIO;
-
-    // At 100%, prefer a fit-page-height baseline similar to browser PDF readers.
-    const fitHeightWidth = availableHeight / safeRatio;
-    const baseWidth = Math.max(MIN_RENDER_WIDTH, Math.min(availableWidth, fitHeightWidth));
-    const rawTargetWidth = Math.min(MAX_RENDER_WIDTH, baseWidth * zoomLevel);
-    const snappedTargetWidth =
-      Math.round(rawTargetWidth / TARGET_WIDTH_STEP) * TARGET_WIDTH_STEP;
-    return Math.max(MIN_RENDER_WIDTH, Math.min(MAX_RENDER_WIDTH, snappedTargetWidth));
-  }
-
   function estimatedPageHeight(pageNumber: number, width = pageTargetWidth): number {
-    const ratio = pageRatios[pageNumber - 1] || DEFAULT_RATIO;
-    return Math.max(120, width * ratio);
+    return estimatePageHeight(pageRatios, pageNumber, width, DEFAULT_RATIO);
   }
 
   function pageBlockHeight(pageNumber: number): number {
@@ -95,32 +90,20 @@
   }
 
   function rebuildPageOffsets(): void {
-    if (pageCount <= 0) {
-      pageStartOffsets = [0];
-      totalContentHeight = 0;
-      return;
-    }
+    const offsets = buildPageOffsets({
+      pageCount,
+      pageRatios,
+      pageTargetWidth,
+      defaultRatio: DEFAULT_RATIO,
+      pageGap: PAGE_GAP,
+    });
 
-    const nextOffsets = new Array(pageCount + 2).fill(0);
-    let accumulated = 0;
-
-    for (let page = 1; page <= pageCount; page += 1) {
-      nextOffsets[page] = accumulated;
-      accumulated += pageBlockHeight(page);
-    }
-
-    nextOffsets[pageCount + 1] = accumulated;
-    pageStartOffsets = nextOffsets;
-    totalContentHeight = accumulated;
+    pageStartOffsets = offsets.pageStartOffsets;
+    totalContentHeight = offsets.totalContentHeight;
   }
 
   function pageStartOffset(pageNumber: number): number {
-    if (pageCount <= 0) {
-      return 0;
-    }
-
-    const normalized = Math.max(1, Math.min(pageCount + 1, Math.floor(pageNumber)));
-    return pageStartOffsets[normalized] ?? 0;
+    return getPageStartOffset(pageStartOffsets, pageCount, pageNumber);
   }
 
   function updateRenderedWindow(centerPage: number): void {
@@ -276,26 +259,12 @@
   }
 
   function pageFromOffset(targetOffset: number): number {
-    if (pageCount === 0) {
-      return 1;
-    }
-
-    const safeOffset = Math.max(0, Math.min(targetOffset, Math.max(0, totalContentHeight - 1)));
-    let low = 1;
-    let high = pageCount;
-
-    while (low < high) {
-      const mid = Math.floor((low + high + 1) / 2);
-      const startOffset = pageStartOffsets[mid] ?? 0;
-
-      if (startOffset <= safeOffset) {
-        low = mid;
-      } else {
-        high = mid - 1;
-      }
-    }
-
-    return low;
+    return resolvePageFromOffset({
+      targetOffset,
+      pageCount,
+      totalContentHeight,
+      pageStartOffsets,
+    });
   }
 
   function setActiveWindow(centerPage: number): void {
@@ -444,56 +413,50 @@
   }
 
   function handleKeydown(event: KeyboardEvent): void {
-    const target = event.target as HTMLElement | null;
-    const editing =
-      target?.tagName === "INPUT" ||
-      target?.tagName === "TEXTAREA" ||
-      target?.isContentEditable;
-
-    if (editing || !container) {
+    if (isEditableTarget(event.target) || !container) {
       return;
     }
 
-    if (event.ctrlKey && event.key === "0") {
+    if (isZoomResetShortcut(event)) {
       event.preventDefault();
       dispatch("zoomchange", { zoom: 1 });
       return;
     }
 
-    if (event.key === "+" || (event.key === "=" && event.ctrlKey)) {
+    if (isViewerZoomInShortcut(event)) {
       event.preventDefault();
       dispatch("zoomchange", { zoom: clampZoom(zoom + ZOOM_STEP) });
       return;
     }
 
-    if (event.key === "-") {
+    if (isViewerZoomOutShortcut(event)) {
       event.preventDefault();
       dispatch("zoomchange", { zoom: clampZoom(zoom - ZOOM_STEP) });
       return;
     }
 
-    if (event.key === "PageDown") {
+    if (isPageDownShortcut(event)) {
       event.preventDefault();
       container.scrollTop += container.clientHeight * 0.92;
       updateActiveFromScrollFallback();
       return;
     }
 
-    if (event.key === "PageUp") {
+    if (isPageUpShortcut(event)) {
       event.preventDefault();
       container.scrollTop -= container.clientHeight * 0.92;
       updateActiveFromScrollFallback();
       return;
     }
 
-    if (event.key === "Home") {
+    if (isHomeShortcut(event)) {
       event.preventDefault();
       container.scrollTop = 0;
       updateActiveFromScrollFallback();
       return;
     }
 
-    if (event.key === "End") {
+    if (isEndShortcut(event)) {
       event.preventDefault();
       container.scrollTop = container.scrollHeight;
       updateActiveFromScrollFallback();
@@ -667,12 +630,18 @@
     }
   }
 
-  $: pageTargetWidth = calculateTargetPageWidth(
+  $: pageTargetWidth = calculateTargetPageWidth({
     containerWidth,
     containerHeight,
-    zoom,
-    pageRatios[0] || DEFAULT_RATIO,
-  );
+    zoomLevel: zoom,
+    ratio: pageRatios[0] || DEFAULT_RATIO,
+    minRenderWidth: MIN_RENDER_WIDTH,
+    maxRenderWidth: MAX_RENDER_WIDTH,
+    pageFitPadding: PAGE_FIT_PADDING,
+    targetWidthStep: TARGET_WIDTH_STEP,
+    fallbackWidth: browser ? window.innerWidth : 960,
+    fallbackHeight: browser ? window.innerHeight : 720,
+  });
 
   $: if (pageCount > 0 && pageTargetWidth > 0 && pageTargetWidth !== lastGeometryWidth) {
     const previousWidth = lastGeometryWidth > 0 ? lastGeometryWidth : pageTargetWidth;

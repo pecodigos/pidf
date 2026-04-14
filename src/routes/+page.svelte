@@ -5,6 +5,17 @@
 
   import { createPdfSession, readInitialPdfPath, type PdfSession } from "$lib/core/pdf";
   import { withTimeout } from "$lib/core/async";
+  import {
+    isEditableTarget,
+    isFindShortcut,
+    isFullscreenShortcut,
+    isNextPageShortcut,
+    isOpenShortcut,
+    isPreviousPageShortcut,
+    isZoomInShortcut,
+    isZoomOutShortcut,
+    isZoomResetShortcut,
+  } from "$lib/core/keyboard";
   import { logPdfStage } from "$lib/core/trace";
   import {
     currentPage,
@@ -85,19 +96,6 @@
     } catch (error) {
       console.warn("[PiDF] session destroy failed or timed out", error);
     }
-  }
-
-  function isEditableTarget(target: EventTarget | null): boolean {
-    const element = target as HTMLElement | null;
-    if (!element) {
-      return false;
-    }
-
-    return (
-      element.tagName === "INPUT" ||
-      element.tagName === "TEXTAREA" ||
-      element.isContentEditable
-    );
   }
 
   async function toggleFullscreenShortcut(): Promise<void> {
@@ -304,22 +302,19 @@
     darkMode.set(prefersDarkMode);
 
     const onWindowKeydown = (event: KeyboardEvent) => {
-      const shortcut = event.ctrlKey || event.metaKey;
-      const key = event.key.toLowerCase();
-
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "o") {
+      if (isOpenShortcut(event)) {
         event.preventDefault();
         void openPdf();
         return;
       }
 
-      if (shortcut && key === "f") {
+      if (isFindShortcut(event)) {
         event.preventDefault();
         openFindShortcut();
         return;
       }
 
-      if (event.key === "F11" || (shortcut && event.shiftKey && key === "f")) {
+      if (isFullscreenShortcut(event)) {
         event.preventDefault();
         void toggleFullscreenShortcut();
         return;
@@ -329,33 +324,31 @@
         return;
       }
 
-      if (!event.altKey && !shortcut) {
-        if (event.key === "ArrowRight") {
-          event.preventDefault();
-          jumpToPage($currentPage + 1);
-          return;
-        }
-
-        if (event.key === "ArrowLeft") {
-          event.preventDefault();
-          jumpToPage($currentPage - 1);
-          return;
-        }
+      if (isNextPageShortcut(event)) {
+        event.preventDefault();
+        jumpToPage($currentPage + 1);
+        return;
       }
 
-      if (shortcut && (event.key === "+" || event.key === "=")) {
+      if (isPreviousPageShortcut(event)) {
+        event.preventDefault();
+        jumpToPage($currentPage - 1);
+        return;
+      }
+
+      if (isZoomInShortcut(event)) {
         event.preventDefault();
         zoomIn();
         return;
       }
 
-      if (shortcut && event.key === "-") {
+      if (isZoomOutShortcut(event)) {
         event.preventDefault();
         zoomOut();
         return;
       }
 
-      if (shortcut && key === "0") {
+      if (isZoomResetShortcut(event)) {
         event.preventDefault();
         resetZoom();
       }
