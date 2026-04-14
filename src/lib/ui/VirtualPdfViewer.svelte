@@ -693,8 +693,17 @@
 >
   {#if !session}
     <div class="empty">
-      <p>Open a local PDF to start.</p>
-      <p class="hint">Only nearby pages are rendered to keep memory usage low.</p>
+      <h2>Keyboard Shortcuts</h2>
+      <p class="hint">Open a PDF and use these controls:</p>
+      <ul class="shortcuts" aria-label="Keyboard shortcuts">
+        <li><kbd>Ctrl/Cmd</kbd> + <kbd>O</kbd> Open PDF</li>
+        <li><kbd>Arrow Left</kbd> / <kbd>Arrow Right</kbd> Previous/Next page</li>
+        <li><kbd>Ctrl/Cmd</kbd> + <kbd>+</kbd> Zoom in</li>
+        <li><kbd>Ctrl/Cmd</kbd> + <kbd>-</kbd> Zoom out</li>
+        <li><kbd>Ctrl/Cmd</kbd> + <kbd>0</kbd> Reset zoom</li>
+        <li><kbd>F11</kbd> or <kbd>Ctrl/Cmd</kbd> + <kbd>Shift</kbd> + <kbd>F</kbd> Fullscreen</li>
+        <li><kbd>Ctrl/Cmd</kbd> + <kbd>F</kbd> Find (page jump)</li>
+      </ul>
     </div>
   {:else}
     <div class="list">
@@ -778,10 +787,17 @@
     min-height: 100%;
     display: grid;
     place-content: center;
-    gap: 0.35rem;
+    gap: 0.6rem;
     text-align: center;
     color: var(--muted);
     padding: 1.2rem;
+  }
+
+  .empty h2 {
+    margin: 0;
+    color: var(--text);
+    font-size: 1.05rem;
+    letter-spacing: 0.01em;
   }
 
   .empty p {
@@ -790,7 +806,35 @@
 
   .hint {
     font-size: 0.82rem;
-    max-width: 26rem;
+    max-width: 32rem;
     margin-inline: auto;
+  }
+
+  .shortcuts {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    display: grid;
+    gap: 0.38rem;
+    justify-items: center;
+    font-size: 0.84rem;
+  }
+
+  .shortcuts li {
+    color: var(--text);
+  }
+
+  kbd {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 1.35rem;
+    padding: 0.02rem 0.3rem;
+    border: 1px solid color-mix(in oklab, var(--line) 80%, transparent);
+    border-radius: 0.35rem;
+    background: var(--panel-raised);
+    color: var(--text);
+    font: inherit;
+    font-weight: 600;
   }
 </style>

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { open } from "@tauri-apps/plugin-dialog";
+  import { getCurrentWindow } from "@tauri-apps/api/window";
   import { onDestroy, onMount } from "svelte";
 
   import { createPdfSession, readInitialPdfPath, type PdfSession } from "$lib/core/pdf";
@@ -27,6 +28,7 @@
   let loading = false;
   let errorMessage = "";
   let showSidebar = false;
+  const appWindow = getCurrentWindow();
   const OPEN_PDF_TIMEOUT_MS = 45000;
   const FIRST_RENDER_TIMEOUT_MS = 12000;
   const SESSION_DESTROY_TIMEOUT_MS = 5000;
@@ -97,6 +99,44 @@
       );
     } catch (error) {
       console.warn("[PiDF] session destroy failed or timed out", error);
+    }
+  }
+
+  function isEditableTarget(target: EventTarget | null): boolean {
+    const element = target as HTMLElement | null;
+    if (!element) {
+      return false;
+    }
+
+    return (
+      element.tagName === "INPUT" ||
+      element.tagName === "TEXTAREA" ||
+      element.isContentEditable
+    );
+  }
+
+  async function toggleFullscreenShortcut(): Promise<void> {
+    try {
+      const isFullscreen = await appWindow.isFullscreen();
+      await appWindow.setFullscreen(!isFullscreen);
+    } catch (error) {
+      console.warn("[PiDF] failed to toggle fullscreen", error);
+    }
+  }
+
+  function openFindShortcut(): void {
+    const response = window.prompt(
+      "Find text is not available in image mode yet. Enter a page number to jump:",
+      String($currentPage),
+    );
+
+    if (!response) {
+      return;
+    }
+
+    const parsedPage = Number.parseInt(response, 10);
+    if (Number.isFinite(parsedPage)) {
+      jumpToPage(parsedPage);
     }
   }
 
@@ -254,9 +294,60 @@
     darkMode.set(prefersDarkMode);
 
     const onWindowKeydown = (event: KeyboardEvent) => {
+      const shortcut = event.ctrlKey || event.metaKey;
+      const key = event.key.toLowerCase();
+
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "o") {
         event.preventDefault();
         void openPdf();
+        return;
+      }
+
+      if (shortcut && key === "f") {
+        event.preventDefault();
+        openFindShortcut();
+        return;
+      }
+
+      if (event.key === "F11" || (shortcut && event.shiftKey && key === "f")) {
+        event.preventDefault();
+        void toggleFullscreenShortcut();
+        return;
+      }
+
+      if (isEditableTarget(event.target)) {
+        return;
+      }
+
+      if (!event.altKey && !shortcut) {
+        if (event.key === "ArrowRight") {
+          event.preventDefault();
+          jumpToPage($currentPage + 1);
+          return;
+        }
+
+        if (event.key === "ArrowLeft") {
+          event.preventDefault();
+          jumpToPage($currentPage - 1);
+          return;
+        }
+      }
+
+      if (shortcut && (event.key === "+" || event.key === "=")) {
+        event.preventDefault();
+        zoomIn();
+        return;
+      }
+
+      if (shortcut && event.key === "-") {
+        event.preventDefault();
+        zoomOut();
+        return;
+      }
+
+      if (shortcut && key === "0") {
+        event.preventDefault();
+        resetZoom();
       }
     };
 
