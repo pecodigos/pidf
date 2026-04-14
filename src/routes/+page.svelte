@@ -46,6 +46,7 @@
   let showFindPanel = false;
   let findPageField = "1";
   let findPanelInput: HTMLInputElement | null = null;
+  let findPanelElement: HTMLDivElement | null = null;
   let lastAttemptedPath: string | null = null;
   let activeOpenRequestId = 0;
   const appWindow = getCurrentWindow();
@@ -414,6 +415,17 @@
   onMount(() => {
     applyInitialThemePreference();
 
+    const onWindowPointerDown = (event: PointerEvent) => {
+      if (!showFindPanel || !findPanelElement) {
+        return;
+      }
+
+      const target = event.target;
+      if (target instanceof Node && !findPanelElement.contains(target)) {
+        closeFindPanel();
+      }
+    };
+
     const onWindowKeydown = (event: KeyboardEvent) => {
       if (event.defaultPrevented) {
         return;
@@ -481,6 +493,7 @@
       }
     };
 
+    window.addEventListener("pointerdown", onWindowPointerDown);
     window.addEventListener("keydown", onWindowKeydown);
 
     void readInitialPdfPath()
@@ -494,9 +507,14 @@
       });
 
     return () => {
+      window.removeEventListener("pointerdown", onWindowPointerDown);
       window.removeEventListener("keydown", onWindowKeydown);
     };
   });
+
+  $: if (showFindPanel && $pageCount <= 0) {
+    closeFindPanel();
+  }
 
   onDestroy(() => {
     clearCopyFeedbackTimer();
@@ -527,7 +545,13 @@
   />
 
   {#if showFindPanel}
-    <section class="find-panel" aria-label="Find and jump">
+    <div
+      class="find-panel"
+      bind:this={findPanelElement}
+      role="dialog"
+      aria-label="Find and jump"
+      aria-modal="false"
+    >
       <div class="find-header">
         <h2>Find</h2>
         <button
@@ -559,7 +583,7 @@
 
         <button type="submit">Go</button>
       </form>
-    </section>
+    </div>
   {/if}
 
   <div class="workbench" class:with-sidebar={showSidebar}>
