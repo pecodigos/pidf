@@ -22,7 +22,8 @@
   const VIEWPORT_PRIORITY_DISTANCE = 1;
   const HIGH_PRIORITY_RENDER_DEBOUNCE_MS = 16;
   const LOW_PRIORITY_RENDER_DEBOUNCE_MS = 260;
-  const RESIZE_RENDER_DEBOUNCE_MS = 140;
+  const RESIZE_RENDER_DEBOUNCE_MS = 120;
+  const FAST_RESIZE_RENDER_DEBOUNCE_MS = 48;
   const ENABLE_PAGE_DIAGNOSTICS = false;
 
   let imageUrl = "";
@@ -300,14 +301,23 @@
 
     const distance = Math.abs($viewerCurrentPage - pageNumber);
     const isHighPriority = distance <= VIEWPORT_PRIORITY_DISTANCE;
+    const renderWidth = Math.max(1, Math.round(targetWidth));
+    const widthChanged = Math.abs(renderWidth - Math.round(cssWidth)) >= 2;
 
-    const debounceMs = imageUrl
-      ? RESIZE_RENDER_DEBOUNCE_MS
-      : pageNumber === 1
-        ? 0
-        : isHighPriority
-          ? HIGH_PRIORITY_RENDER_DEBOUNCE_MS
-          : Math.max(INITIAL_RENDER_DEBOUNCE_MS, LOW_PRIORITY_RENDER_DEBOUNCE_MS);
+    let debounceMs = Math.max(INITIAL_RENDER_DEBOUNCE_MS, LOW_PRIORITY_RENDER_DEBOUNCE_MS);
+
+    if (pageNumber === 1 && !imageUrl) {
+      debounceMs = 0;
+    } else if (isHighPriority && widthChanged) {
+      debounceMs = 0;
+    } else if (isHighPriority) {
+      debounceMs = HIGH_PRIORITY_RENDER_DEBOUNCE_MS;
+    } else if (imageUrl && widthChanged) {
+      debounceMs = FAST_RESIZE_RENDER_DEBOUNCE_MS;
+    } else if (imageUrl) {
+      debounceMs = RESIZE_RENDER_DEBOUNCE_MS;
+    }
+
     renderDebounce = setTimeout(() => {
       renderDebounce = null;
       void renderPage();

@@ -27,8 +27,8 @@
   const RENDER_WINDOW_SHIFT_MARGIN = 4;
   const RESIZE_COMMIT_MS = 180;
   const TARGET_WIDTH_STEP = 48;
+  const BASE_PAGE_SCALE = 0.82;
   const MAX_RENDER_WIDTH = 1280;
-  const ZOOM_COMMIT_MS = 180;
   const ENABLE_VIEWER_DIAGNOSTICS = false;
 
   let container: HTMLDivElement;
@@ -54,15 +54,14 @@
   let lastSession: PdfSession | null = null;
   let firstRenderCommitted = false;
   let lastLoggedActivePage = 0;
-  let renderZoom = zoom;
-  let zoomDebounce: ReturnType<typeof setTimeout> | null = null;
+  let lastGeometryWidth = 0;
 
   const renderCache = new RenderCache(24);
 
   function calculateTargetPageWidth(width: number, zoomLevel: number): number {
     const measuredWidth = width > 0 ? width : browser ? window.innerWidth : 960;
     const available = Math.max(260, measuredWidth - 48);
-    const rawTargetWidth = Math.min(MAX_RENDER_WIDTH, available * zoomLevel);
+    const rawTargetWidth = Math.min(MAX_RENDER_WIDTH, available * BASE_PAGE_SCALE * zoomLevel);
     const snappedTargetWidth =
       Math.round(rawTargetWidth / TARGET_WIDTH_STEP) * TARGET_WIDTH_STEP;
     return Math.max(260, Math.min(MAX_RENDER_WIDTH, snappedTargetWidth));
@@ -142,15 +141,42 @@
     );
   }
 
-  function handleGeometryChange(): void {
+  function handleGeometryChange(previousWidth: number): void {
     if (pageCount <= 0) {
       return;
+    }
+
+    let anchorPage = currentPage;
+    let anchorRatio = 0;
+
+    if (container) {
+      const viewportHeight = Math.max(1, container.clientHeight);
+      const markerOffset = container.scrollTop + Math.max(80, viewportHeight * 0.2);
+      anchorPage = pageFromOffset(markerOffset);
+
+      const previousPageStart = pageStartOffset(anchorPage);
+      const previousPageBlockHeight = Math.max(
+        1,
+        estimatedPageHeight(anchorPage, previousWidth) + PAGE_GAP,
+      );
+      const offsetWithinPage = container.scrollTop - previousPageStart;
+      anchorRatio = Math.max(0, Math.min(1, offsetWithinPage / previousPageBlockHeight));
     }
 
     rebuildPageOffsets();
     renderWindowStart = 1;
     renderWindowEnd = 0;
-    updateRenderedWindow(currentPage);
+
+    if (container) {
+      const newPageStart = pageStartOffset(anchorPage);
+      const newPageBlockHeight = Math.max(1, pageBlockHeight(anchorPage));
+      const nextScrollTop = newPageStart + anchorRatio * newPageBlockHeight;
+      const maxScrollTop = Math.max(0, totalContentHeight - container.clientHeight);
+      container.scrollTop = Math.max(0, Math.min(maxScrollTop, nextScrollTop));
+    }
+
+    updateRenderedWindow(anchorPage);
+    updateActiveFromScroll();
   }
 
   function emitCurrentPage(nextPage: number): void {
@@ -430,6 +456,7 @@
   function initializeSession(nextSession: PdfSession): void {
     pageCount = nextSession.pageCount;
     pageRatios = new Array(pageCount).fill(DEFAULT_RATIO);
+    lastGeometryWidth = 0;
     rebuildPageOffsets();
     setActiveWindow(1);
     currentPage = 1;
@@ -539,10 +566,6 @@
       resizeObserver = null;
     }
 
-    if (zoomDebounce) {
-      clearTimeout(zoomDebounce);
-    }
-
     if (zoomWheelTimer) {
       clearTimeout(zoomWheelTimer);
       zoomWheelTimer = null;
@@ -574,26 +597,19 @@
       currentPage = 1;
       firstRenderCommitted = false;
       lastLoggedActivePage = 0;
+      lastGeometryWidth = 0;
       renderCache.clear();
     } else {
       initializeSession(session);
     }
   }
 
-  $: pageTargetWidth = calculateTargetPageWidth(containerWidth, renderZoom);
+  $: pageTargetWidth = calculateTargetPageWidth(containerWidth, zoom);
 
-  $: if (Math.abs(zoom - renderZoom) > 0.0001) {
-    if (zoomDebounce) {
-      clearTimeout(zoomDebounce);
-    }
-
-    zoomDebounce = setTimeout(() => {
-      renderZoom = zoom;
-    }, ZOOM_COMMIT_MS);
-  }
-
-  $: if (pageCount > 0 && pageTargetWidth > 0) {
-    handleGeometryChange();
+  $: if (pageCount > 0 && pageTargetWidth > 0 && pageTargetWidth !== lastGeometryWidth) {
+    const previousWidth = lastGeometryWidth > 0 ? lastGeometryWidth : pageTargetWidth;
+    handleGeometryChange(previousWidth);
+    lastGeometryWidth = pageTargetWidth;
   }
 </script>
 
