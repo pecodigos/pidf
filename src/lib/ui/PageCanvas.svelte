@@ -8,6 +8,7 @@
   export let session: PdfSession;
   export let pageNumber: number;
   export let targetWidth = 900;
+  export let priority: "high" | "low" = "low";
   export let cache: RenderCache;
 
   const dispatch = createEventDispatcher<{
@@ -18,6 +19,8 @@
   const DEFAULT_RATIO = Math.SQRT2;
   const RENDER_TIMEOUT_MS = 12000;
   const INITIAL_RENDER_DEBOUNCE_MS = 40;
+  const HIGH_PRIORITY_RENDER_DEBOUNCE_MS = 16;
+  const LOW_PRIORITY_RENDER_DEBOUNCE_MS = 260;
   const RESIZE_RENDER_DEBOUNCE_MS = 140;
   const ENABLE_PAGE_DIAGNOSTICS = false;
 
@@ -290,14 +293,16 @@
       ? RESIZE_RENDER_DEBOUNCE_MS
       : pageNumber === 1
         ? 0
-        : INITIAL_RENDER_DEBOUNCE_MS;
+        : priority === "high"
+          ? HIGH_PRIORITY_RENDER_DEBOUNCE_MS
+          : Math.max(INITIAL_RENDER_DEBOUNCE_MS, LOW_PRIORITY_RENDER_DEBOUNCE_MS);
     renderDebounce = setTimeout(() => {
       renderDebounce = null;
       void renderPage();
     }, debounceMs);
   }
 
-  $: if (session && targetWidth > 0) {
+  $: if (session && targetWidth > 0 && priority) {
     scheduleRender();
   }
 

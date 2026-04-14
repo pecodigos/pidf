@@ -42,6 +42,7 @@
   let topSpacerHeight = 0;
   let bottomSpacerHeight = 0;
   let activeMap: Record<number, boolean> = {};
+  let renderPriorityMap: Record<number, "high" | "low"> = {};
   let resizeObserver: ResizeObserver | null = null;
   let scrollFrame: number | null = null;
   let resizeDebounce: ReturnType<typeof setTimeout> | null = null;
@@ -167,17 +168,23 @@
     dispatch("pagechange", { page: currentPage });
   }
 
-  function setActivePages(pages: number[]): void {
+  function setActivePages(pages: number[], centerPage = currentPage): void {
     const nextMap: Record<number, boolean> = {};
+    const nextPriority: Record<number, "high" | "low"> = {};
+
     for (const page of pages) {
       if (page >= 1 && page <= pageCount) {
         nextMap[page] = true;
+
+        const distance = Math.abs(page - centerPage);
+        nextPriority[page] = distance <= 1 ? "high" : "low";
       }
     }
 
     // Always keep the first page warm to avoid empty first paint.
     if (pageCount > 0) {
       nextMap[1] = true;
+      nextPriority[1] ||= centerPage <= 2 ? "high" : "low";
     }
 
     const currentKeys = Object.keys(activeMap);
@@ -187,7 +194,12 @@
       let unchanged = true;
 
       for (const key of nextKeys) {
-        if (!activeMap[key as unknown as number]) {
+        if (!Object.prototype.hasOwnProperty.call(activeMap, key)) {
+          unchanged = false;
+          break;
+        }
+
+        if (renderPriorityMap[Number.parseInt(key, 10)] !== nextPriority[Number.parseInt(key, 10)]) {
           unchanged = false;
           break;
         }
@@ -199,6 +211,7 @@
     }
 
     activeMap = nextMap;
+    renderPriorityMap = nextPriority;
   }
 
   function pageFromOffset(targetOffset: number): number {
@@ -234,7 +247,7 @@
       pages.push(page);
     }
 
-    setActivePages(pages);
+    setActivePages(pages, centerPage);
     updateRenderedWindow(centerPage);
   }
 
@@ -485,7 +498,7 @@
       normalizedPage,
       normalizedPage + 1,
       normalizedPage + ACTIVE_PAGES_AFTER,
-    ]);
+    ], normalizedPage);
     updateRenderedWindow(normalizedPage);
 
     emitCurrentPage(normalizedPage);
@@ -574,6 +587,7 @@
       topSpacerHeight = 0;
       bottomSpacerHeight = 0;
       activeMap = {};
+      renderPriorityMap = {};
       currentPage = 1;
       firstRenderCommitted = false;
       lastLoggedActivePage = 0;
@@ -632,6 +646,7 @@
               {session}
               {pageNumber}
               targetWidth={pageTargetWidth}
+              priority={renderPriorityMap[pageNumber] ?? "low"}
               cache={renderCache}
               on:rendercommitted={handlePageRenderCommitted}
               on:rendererror={handlePageRenderError}
