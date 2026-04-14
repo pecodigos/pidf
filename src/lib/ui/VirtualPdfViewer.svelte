@@ -27,7 +27,7 @@
   const RENDER_WINDOW_SHIFT_MARGIN = 4;
   const RESIZE_COMMIT_MS = 180;
   const TARGET_WIDTH_STEP = 48;
-  const BASE_PAGE_SCALE = 0.82;
+  const BASE_PAGE_SCALE = 0.7;
   const MAX_RENDER_WIDTH = 1280;
   const ENABLE_VIEWER_DIAGNOSTICS = false;
 
@@ -55,6 +55,9 @@
   let firstRenderCommitted = false;
   let lastLoggedActivePage = 0;
   let lastGeometryWidth = 0;
+  let geometryFrame: number | null = null;
+  let pendingGeometryPreviousWidth = 0;
+  let pendingGeometryNextWidth = 0;
 
   const renderCache = new RenderCache(24);
 
@@ -177,6 +180,39 @@
 
     updateRenderedWindow(anchorPage);
     updateActiveFromScroll();
+  }
+
+  function scheduleGeometryChange(previousWidth: number, nextWidth: number): void {
+    if (!browser) {
+      handleGeometryChange(previousWidth);
+      lastGeometryWidth = nextWidth;
+      return;
+    }
+
+    if (pendingGeometryPreviousWidth === 0) {
+      pendingGeometryPreviousWidth = previousWidth;
+    }
+
+    pendingGeometryNextWidth = nextWidth;
+
+    if (geometryFrame !== null) {
+      return;
+    }
+
+    geometryFrame = window.requestAnimationFrame(() => {
+      geometryFrame = null;
+
+      const widthBefore = pendingGeometryPreviousWidth > 0
+        ? pendingGeometryPreviousWidth
+        : previousWidth;
+      const widthAfter = pendingGeometryNextWidth > 0 ? pendingGeometryNextWidth : nextWidth;
+
+      pendingGeometryPreviousWidth = 0;
+      pendingGeometryNextWidth = 0;
+
+      handleGeometryChange(widthBefore);
+      lastGeometryWidth = widthAfter;
+    });
   }
 
   function emitCurrentPage(nextPage: number): void {
@@ -556,6 +592,11 @@
   });
 
   onDestroy(() => {
+    if (geometryFrame !== null) {
+      window.cancelAnimationFrame(geometryFrame);
+      geometryFrame = null;
+    }
+
     if (scrollFrame !== null) {
       window.cancelAnimationFrame(scrollFrame);
       scrollFrame = null;
@@ -608,8 +649,7 @@
 
   $: if (pageCount > 0 && pageTargetWidth > 0 && pageTargetWidth !== lastGeometryWidth) {
     const previousWidth = lastGeometryWidth > 0 ? lastGeometryWidth : pageTargetWidth;
-    handleGeometryChange(previousWidth);
-    lastGeometryWidth = pageTargetWidth;
+    scheduleGeometryChange(previousWidth, pageTargetWidth);
   }
 </script>
 

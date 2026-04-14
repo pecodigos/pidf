@@ -23,7 +23,7 @@
   const HIGH_PRIORITY_RENDER_DEBOUNCE_MS = 16;
   const LOW_PRIORITY_RENDER_DEBOUNCE_MS = 260;
   const RESIZE_RENDER_DEBOUNCE_MS = 120;
-  const FAST_RESIZE_RENDER_DEBOUNCE_MS = 48;
+  const OFFSCREEN_RESIZE_RENDER_DEBOUNCE_MS = 420;
   const ENABLE_PAGE_DIAGNOSTICS = false;
 
   let imageUrl = "";
@@ -314,8 +314,8 @@
       debounceMs = 0;
     } else if (isHighPriority) {
       debounceMs = HIGH_PRIORITY_RENDER_DEBOUNCE_MS;
-    } else if (imageUrl && widthChanged) {
-      debounceMs = FAST_RESIZE_RENDER_DEBOUNCE_MS;
+    } else if (widthChanged) {
+      debounceMs = OFFSCREEN_RESIZE_RENDER_DEBOUNCE_MS;
     } else if (imageUrl) {
       debounceMs = RESIZE_RENDER_DEBOUNCE_MS;
     }
