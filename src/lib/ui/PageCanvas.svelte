@@ -1,13 +1,14 @@
 <script lang="ts">
   import { createEventDispatcher, onDestroy } from "svelte";
 
+  import { withTimeout } from "$lib/core/async";
   import { cacheKey, type RenderCache } from "$lib/core/renderCache";
   import type { PdfSession } from "$lib/core/pdf";
-  import { currentPage as viewerCurrentPage } from "$lib/state/viewer";
   import { logPdfStage } from "$lib/core/trace";
 
   export let session: PdfSession;
   export let pageNumber: number;
+  export let currentPage = 1;
   export let targetWidth = 900;
   export let cache: RenderCache;
 
@@ -66,27 +67,6 @@
 
   function isRenderSupersededError(message: string): boolean {
     return message.toLowerCase().includes("superseded");
-  }
-
-  async function withTimeout<T>(
-    promise: Promise<T>,
-    timeoutMs: number,
-    message: string,
-  ): Promise<T> {
-    let timeoutId: ReturnType<typeof setTimeout> | null = null;
-
-    try {
-      return await Promise.race([
-        promise,
-        new Promise<never>((_, reject) => {
-          timeoutId = setTimeout(() => reject(new Error(message)), timeoutMs);
-        }),
-      ]);
-    } finally {
-      if (timeoutId) {
-        clearTimeout(timeoutId);
-      }
-    }
   }
 
   function clearActiveBlobUrl(): void {
@@ -210,7 +190,7 @@
         targetWidth: renderWidth,
       });
 
-      const renderPriority = Math.min(4096, Math.abs($viewerCurrentPage - pageNumber));
+      const renderPriority = Math.min(4096, Math.abs(currentPage - pageNumber));
 
       const rendered = await withTimeout(
         session.renderPage(pageNumber, renderWidth, renderPriority),
@@ -301,7 +281,7 @@
       renderDebounce = null;
     }
 
-    const distance = Math.abs($viewerCurrentPage - pageNumber);
+    const distance = Math.abs(currentPage - pageNumber);
     const isHighPriority = distance <= VIEWPORT_PRIORITY_DISTANCE;
     const renderWidth = Math.max(1, Math.round(targetWidth));
     const widthChanged = Math.abs(renderWidth - Math.round(cssWidth)) >= 2;
@@ -326,7 +306,7 @@
     }, debounceMs);
   }
 
-  $: if (session && targetWidth > 0 && $viewerCurrentPage >= 0) {
+  $: if (session && targetWidth > 0 && currentPage >= 0) {
     scheduleRender();
   }
 

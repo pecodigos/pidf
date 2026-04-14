@@ -4,6 +4,7 @@
   import { onDestroy, onMount } from "svelte";
 
   import { createPdfSession, readInitialPdfPath, type PdfSession } from "$lib/core/pdf";
+  import { withTimeout } from "$lib/core/async";
   import { logPdfStage } from "$lib/core/trace";
   import {
     currentPage,
@@ -28,6 +29,7 @@
   let loading = false;
   let errorMessage = "";
   let showSidebar = false;
+  let activeOpenRequestId = 0;
   const appWindow = getCurrentWindow();
   const OPEN_PDF_TIMEOUT_MS = 45000;
   const FIRST_RENDER_TIMEOUT_MS = 12000;
@@ -40,23 +42,6 @@
   };
 
   let pendingFirstRender: PendingFirstRender | null = null;
-
-  async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
-    let timeoutId: ReturnType<typeof setTimeout> | null = null;
-
-    try {
-      return await Promise.race([
-        promise,
-        new Promise<never>((_, reject) => {
-          timeoutId = setTimeout(() => reject(new Error(message)), timeoutMs);
-        }),
-      ]);
-    } finally {
-      if (timeoutId) {
-        clearTimeout(timeoutId);
-      }
-    }
-  }
 
   function extractFileName(path: string): string {
     const parts = path.split(/[\\/]/);
@@ -187,12 +172,13 @@
   }
 
   async function loadPdfPath(selectedPath: string): Promise<void> {
+    const openRequestId = ++activeOpenRequestId;
+
     loading = true;
     errorMessage = "";
 
     console.info("[PiDF] opening selected PDF", { path: selectedPath });
 
-    const previousSession = session;
     let nextSession: PdfSession | null = null;
 
     try {
@@ -201,6 +187,16 @@
         OPEN_PDF_TIMEOUT_MS,
         `Opening PDF timed out after ${OPEN_PDF_TIMEOUT_MS}ms.`,
       );
+
+      if (openRequestId !== activeOpenRequestId) {
+        if (nextSession) {
+          await destroySessionSafely(nextSession);
+        }
+
+        return;
+      }
+
+      const previousSession = session;
 
       session = nextSession;
 
@@ -212,6 +208,14 @@
       void destroySessionSafely(previousSession);
       viewer?.jumpToPage(1);
     } catch (error) {
+      if (openRequestId !== activeOpenRequestId) {
+        if (nextSession) {
+          void destroySessionSafely(nextSession);
+        }
+
+        return;
+      }
+
       const message = error instanceof Error ? error.message : String(error);
 
       if (nextSession) {
@@ -225,11 +229,17 @@
         error: message,
       });
     } finally {
-      loading = false;
+      if (openRequestId === activeOpenRequestId) {
+        loading = false;
+      }
     }
   }
 
   async function openPdf(): Promise<void> {
+    if (loading) {
+      return;
+    }
+
     const selectedPath = await open({
       title: "Open PDF",
       defaultPath: "/home/pepe/Documents",

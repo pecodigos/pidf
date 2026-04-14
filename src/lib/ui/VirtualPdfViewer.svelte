@@ -720,6 +720,7 @@
             <PageCanvas
               {session}
               {pageNumber}
+              currentPage={currentPage}
               targetWidth={pageTargetWidth}
               cache={renderCache}
               on:rendercommitted={handlePageRenderCommitted}

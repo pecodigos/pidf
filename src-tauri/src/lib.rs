@@ -4,10 +4,11 @@ use serde::Serialize;
 use std::collections::{hash_map::DefaultHasher, HashMap, VecDeque};
 use std::fs;
 use std::hash::{Hash, Hasher};
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, OnceLock};
 use std::thread;
-use std::time::UNIX_EPOCH;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 fn is_pdf_file(path: &str) -> bool {
     let file_path = Path::new(path);
@@ -145,6 +146,110 @@ fn render_cache_path(path: &str, page_number: u16, target_width: u16) -> Result<
 
     let file_name = format!("p{}_w{}_{}.jpg", page_number, target_width, key);
     Ok(render_cache_dir()?.join(file_name))
+}
+
+struct CacheFileEntry {
+    path: PathBuf,
+    size: u64,
+    modified_at: SystemTime,
+}
+
+fn prune_render_cache_dir(
+    cache_dir: &Path,
+    max_total_bytes: u64,
+    max_file_age_secs: u64,
+) -> Result<(), String> {
+    let now = SystemTime::now();
+    let mut retained: Vec<CacheFileEntry> = Vec::new();
+    let mut total_bytes = 0_u64;
+
+    let entries = match fs::read_dir(cache_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(format!(
+                "Failed to list render cache directory {}: {error}",
+                cache_dir.to_string_lossy()
+            ));
+        }
+    };
+
+    for entry_result in entries {
+        let entry = match entry_result {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+
+        let path = entry.path();
+        let metadata = match entry.metadata() {
+            Ok(metadata) => metadata,
+            Err(_) => continue,
+        };
+
+        if !metadata.is_file() {
+            continue;
+        }
+
+        let file_size = metadata.len();
+        let modified_at = metadata.modified().unwrap_or(UNIX_EPOCH);
+        let file_age_secs = now
+            .duration_since(modified_at)
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0);
+
+        if file_age_secs > max_file_age_secs {
+            let _ = fs::remove_file(&path);
+            continue;
+        }
+
+        total_bytes = total_bytes.saturating_add(file_size);
+        retained.push(CacheFileEntry {
+            path,
+            size: file_size,
+            modified_at,
+        });
+    }
+
+    if total_bytes <= max_total_bytes {
+        return Ok(());
+    }
+
+    retained.sort_by_key(|entry| {
+        entry
+            .modified_at
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis())
+            .unwrap_or(0)
+    });
+
+    for entry in retained {
+        if total_bytes <= max_total_bytes {
+            break;
+        }
+
+        if fs::remove_file(&entry.path).is_ok() {
+            total_bytes = total_bytes.saturating_sub(entry.size);
+        }
+    }
+
+    Ok(())
+}
+
+const MAX_RENDER_CACHE_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_RENDER_CACHE_FILE_AGE_SECS: u64 = 14 * 24 * 60 * 60;
+const CACHE_PRUNE_INTERVAL_RENDERS: u32 = 40;
+
+fn prune_render_cache_best_effort() {
+    let cache_dir = match render_cache_dir() {
+        Ok(cache_dir) => cache_dir,
+        Err(_) => return,
+    };
+
+    let _ = prune_render_cache_dir(
+        &cache_dir,
+        MAX_RENDER_CACHE_BYTES,
+        MAX_RENDER_CACHE_FILE_AGE_SECS,
+    );
 }
 
 #[derive(Serialize)]
@@ -302,6 +407,9 @@ fn run_pdf_worker(receiver: mpsc::Receiver<PdfWorkerRequest>) {
     let mut session_paths: HashMap<String, String> = HashMap::new();
     let mut next_session_id: u64 = 1;
     let mut deferred_requests: VecDeque<PdfWorkerRequest> = VecDeque::new();
+    let mut renders_since_prune: u32 = 0;
+
+    prune_render_cache_best_effort();
 
     loop {
         let request = if let Some(deferred) = deferred_requests.pop_front() {
@@ -433,7 +541,18 @@ fn run_pdf_worker(receiver: mpsc::Receiver<PdfWorkerRequest>) {
                         render_pdf_page(document, path, pending.page_number, pending.target_width)
                     })();
 
+                    let render_succeeded = result.is_ok();
+
                     let _ = pending.response.send(result);
+
+                    if render_succeeded {
+                        renders_since_prune = renders_since_prune.saturating_add(1);
+
+                        if renders_since_prune >= CACHE_PRUNE_INTERVAL_RENDERS {
+                            renders_since_prune = 0;
+                            prune_render_cache_best_effort();
+                        }
+                    }
                 }
             }
             PdfWorkerRequest::Close {
@@ -581,6 +700,80 @@ fn trace_pdf_stage(
         "[PiDF][stage] ts={} elapsed_ms={} stage={} details={}",
         timestamp, elapsed, stage, details
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, SystemTime};
+
+    fn create_temp_test_dir(name: &str) -> PathBuf {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("pidf-test-{}-{}", name, now));
+        fs::create_dir_all(&dir).expect("failed to create temp test directory");
+        dir
+    }
+
+    fn write_test_file(path: &Path, bytes: usize) {
+        fs::write(path, vec![0_u8; bytes]).expect("failed to write test file");
+    }
+
+    fn total_size(dir: &Path) -> u64 {
+        fs::read_dir(dir)
+            .expect("failed to list directory")
+            .filter_map(Result::ok)
+            .filter_map(|entry| entry.metadata().ok())
+            .filter(|metadata| metadata.is_file())
+            .map(|metadata| metadata.len())
+            .sum()
+    }
+
+    #[test]
+    fn normalization_clamps_to_expected_ranges() {
+        assert_eq!(normalize_page_number(0, 0), 1);
+        assert_eq!(normalize_page_number(0, 10), 1);
+        assert_eq!(normalize_page_number(999, 10), 10);
+
+        assert_eq!(normalize_target_width(0), 240);
+        assert_eq!(normalize_target_width(4096), 2200);
+
+        assert_eq!(normalize_render_priority(None), 100);
+        assert_eq!(normalize_render_priority(Some(5000)), 4096);
+    }
+
+    #[test]
+    fn prune_render_cache_enforces_size_limit() {
+        let cache_dir = create_temp_test_dir("size-limit");
+
+        write_test_file(&cache_dir.join("a.jpg"), 230);
+        write_test_file(&cache_dir.join("b.jpg"), 230);
+        write_test_file(&cache_dir.join("c.jpg"), 230);
+
+        prune_render_cache_dir(&cache_dir, 460, u64::MAX).expect("prune should succeed");
+
+        assert!(total_size(&cache_dir) <= 460);
+
+        let _ = fs::remove_dir_all(cache_dir);
+    }
+
+    #[test]
+    fn prune_render_cache_removes_stale_files() {
+        let cache_dir = create_temp_test_dir("age-limit");
+        let stale_file = cache_dir.join("stale.jpg");
+
+        write_test_file(&stale_file, 64);
+
+        thread::sleep(Duration::from_secs(1));
+
+        prune_render_cache_dir(&cache_dir, u64::MAX, 0).expect("prune should succeed");
+
+        assert!(!stale_file.exists());
+
+        let _ = fs::remove_dir_all(cache_dir);
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

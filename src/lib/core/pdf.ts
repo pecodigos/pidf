@@ -1,4 +1,5 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { withTimeout } from "./async";
 import { createPdfOpenTrace } from "./trace";
 
 const MIN_PAGE_NUMBER = 1;
@@ -48,27 +49,6 @@ function describeError(error: unknown): { name?: string; message: string; stack?
   }
 
   return { message: String(error) };
-}
-
-async function withTimeout<T>(
-  promise: Promise<T>,
-  timeoutMs: number,
-  message: string,
-): Promise<T> {
-  let timeoutId: ReturnType<typeof setTimeout> | null = null;
-
-  try {
-    return await Promise.race([
-      promise,
-      new Promise<never>((_, reject) => {
-        timeoutId = setTimeout(() => reject(new Error(message)), timeoutMs);
-      }),
-    ]);
-  } finally {
-    if (timeoutId) {
-      clearTimeout(timeoutId);
-    }
-  }
 }
 
 function normalizeTargetWidth(targetWidth: number): number {
