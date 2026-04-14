@@ -27,7 +27,8 @@
   const RENDER_WINDOW_SHIFT_MARGIN = 4;
   const RESIZE_COMMIT_MS = 180;
   const TARGET_WIDTH_STEP = 48;
-  const BASE_PAGE_SCALE = 0.7;
+  const MIN_RENDER_WIDTH = 240;
+  const PAGE_FIT_PADDING = 32;
   const MAX_RENDER_WIDTH = 1280;
   const ENABLE_VIEWER_DIAGNOSTICS = false;
 
@@ -50,6 +51,8 @@
   let zoomWheelDelta = 0;
   let currentPage = 1;
   let containerWidth = 0;
+  let containerHeight = 0;
+  let pendingContainerHeight = 0;
   let pageTargetWidth = 900;
   let lastSession: PdfSession | null = null;
   let firstRenderCommitted = false;
@@ -61,13 +64,25 @@
 
   const renderCache = new RenderCache(24);
 
-  function calculateTargetPageWidth(width: number, zoomLevel: number): number {
+  function calculateTargetPageWidth(
+    width: number,
+    height: number,
+    zoomLevel: number,
+    ratio: number,
+  ): number {
     const measuredWidth = width > 0 ? width : browser ? window.innerWidth : 960;
-    const available = Math.max(260, measuredWidth - 48);
-    const rawTargetWidth = Math.min(MAX_RENDER_WIDTH, available * BASE_PAGE_SCALE * zoomLevel);
+    const measuredHeight = height > 0 ? height : browser ? window.innerHeight : 720;
+    const availableWidth = Math.max(MIN_RENDER_WIDTH, measuredWidth - 48);
+    const availableHeight = Math.max(180, measuredHeight - PAGE_FIT_PADDING);
+    const safeRatio = ratio > 0 ? ratio : DEFAULT_RATIO;
+
+    // At 100%, prefer a fit-page-height baseline similar to browser PDF readers.
+    const fitHeightWidth = availableHeight / safeRatio;
+    const baseWidth = Math.max(MIN_RENDER_WIDTH, Math.min(availableWidth, fitHeightWidth));
+    const rawTargetWidth = Math.min(MAX_RENDER_WIDTH, baseWidth * zoomLevel);
     const snappedTargetWidth =
       Math.round(rawTargetWidth / TARGET_WIDTH_STEP) * TARGET_WIDTH_STEP;
-    return Math.max(260, Math.min(MAX_RENDER_WIDTH, snappedTargetWidth));
+    return Math.max(MIN_RENDER_WIDTH, Math.min(MAX_RENDER_WIDTH, snappedTargetWidth));
   }
 
   function estimatedPageHeight(pageNumber: number, width = pageTargetWidth): number {
@@ -555,6 +570,7 @@
   onMount(() => {
     if (container) {
       containerWidth = container.clientWidth;
+      containerHeight = container.clientHeight;
     }
 
     if (browser && typeof ResizeObserver !== "undefined" && container) {
@@ -564,6 +580,7 @@
         }
 
         pendingContainerWidth = container.clientWidth;
+        pendingContainerHeight = container.clientHeight;
 
         if (resizeDebounce) {
           clearTimeout(resizeDebounce);
@@ -577,8 +594,13 @@
           }
 
           const nextWidth = pendingContainerWidth || container.clientWidth;
+          const nextHeight = pendingContainerHeight || container.clientHeight;
           if (Math.abs(nextWidth - containerWidth) >= 2) {
             containerWidth = nextWidth;
+          }
+
+          if (Math.abs(nextHeight - containerHeight) >= 2) {
+            containerHeight = nextHeight;
           }
 
           scheduleActiveWindowUpdate();
@@ -645,7 +667,12 @@
     }
   }
 
-  $: pageTargetWidth = calculateTargetPageWidth(containerWidth, zoom);
+  $: pageTargetWidth = calculateTargetPageWidth(
+    containerWidth,
+    containerHeight,
+    zoom,
+    pageRatios[0] || DEFAULT_RATIO,
+  );
 
   $: if (pageCount > 0 && pageTargetWidth > 0 && pageTargetWidth !== lastGeometryWidth) {
     const previousWidth = lastGeometryWidth > 0 ? lastGeometryWidth : pageTargetWidth;
