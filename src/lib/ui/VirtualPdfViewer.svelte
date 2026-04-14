@@ -43,10 +43,10 @@
   const RENDER_PAGES_AFTER = 14;
   const RENDER_WINDOW_SHIFT_MARGIN = 4;
   const RESIZE_COMMIT_MS = 180;
-  const TARGET_WIDTH_STEP = 48;
+  const TARGET_WIDTH_STEP = 64;
   const MIN_RENDER_WIDTH = 240;
   const PAGE_FIT_PADDING = 32;
-  const MAX_RENDER_WIDTH = 1280;
+  const MAX_RENDER_WIDTH = 1120;
   const ENABLE_VIEWER_DIAGNOSTICS = false;
 
   let container: HTMLDivElement;

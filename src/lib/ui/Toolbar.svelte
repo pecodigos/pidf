@@ -22,6 +22,7 @@
 
   let pageField = "1";
   let isEditingPageField = false;
+  $: normalizedPageCount = Math.max(1, pageCount);
 
   $: if (!isEditingPageField) {
     pageField = String(currentPage);
@@ -44,122 +45,181 @@
   }
 </script>
 
-<header class="toolbar">
-  <div class="left">
-    <button
-      class="ghost"
-      on:click={() => dispatch("open")}
-      disabled={loading}
-      title="Open PDF (Ctrl/Cmd+O)"
-      aria-label="Open PDF"
-    >
-      {loading ? "Opening..." : "Open PDF"}
-    </button>
-    <button
-      class="ghost"
-      on:click={() => dispatch("find")}
-      disabled={loading || pageCount <= 0}
-      title="Find or jump to page (Ctrl/Cmd+F)"
-      aria-label="Find or jump to page"
-    >
-      Find
-    </button>
-    <button
-      class="ghost"
-      on:click={() => dispatch("togglesidebar")}
-      aria-pressed={showSidebar}
-      title={showSidebar ? "Hide page rail" : "Show page rail"}
-    >
-      {showSidebar ? "Hide Page Rail" : "Show Page Rail"}
-    </button>
-    <span class="file" title={fileName}>{fileName}</span>
+<header class="toolbar" role="toolbar" aria-label="PDF controls">
+  <div class="toolbar-shell">
+    <div class="group group-primary">
+      <button
+        class="btn"
+        on:click={() => dispatch("open")}
+        disabled={loading}
+        title="Open PDF (Ctrl/Cmd+O)"
+        aria-label="Open PDF"
+      >
+        {loading ? "Opening..." : "Open"}
+      </button>
+      <button
+        class="btn"
+        on:click={() => dispatch("find")}
+        disabled={loading || pageCount <= 0}
+        title="Find or jump to page (Ctrl/Cmd+F)"
+        aria-label="Find or jump to page"
+      >
+        Find
+      </button>
+      <button
+        class="btn"
+        on:click={() => dispatch("togglesidebar")}
+        aria-pressed={showSidebar}
+        title={showSidebar ? "Hide page rail" : "Show page rail"}
+      >
+        {showSidebar ? "Rail On" : "Rail Off"}
+      </button>
+    </div>
+
+    <div class="title-group" aria-live="polite">
+      <p class="file" title={fileName}>{fileName}</p>
+      <p class="meta">
+        {#if pageCount > 0}
+          Page {currentPage} of {normalizedPageCount}
+        {:else}
+          Open a PDF to begin
+        {/if}
+      </p>
+    </div>
+
+    <div class="group group-view">
+      <div class="zoom-group" aria-label="Zoom controls">
+        <button
+          class="btn icon"
+          on:click={() => dispatch("zoomout")}
+          disabled={loading}
+          title="Zoom out (Ctrl/Cmd+-)"
+          aria-label="Zoom out"
+        >
+          -
+        </button>
+        <button
+          class="btn zoom"
+          on:click={() => dispatch("zoomreset")}
+          disabled={loading}
+          title="Reset zoom (Ctrl/Cmd+0)"
+          aria-label="Reset zoom"
+        >
+          {Math.round(zoom * 100)}
+        </button>
+        <button
+          class="btn icon"
+          on:click={() => dispatch("zoomin")}
+          disabled={loading}
+          title="Zoom in (Ctrl/Cmd++)"
+          aria-label="Zoom in"
+        >
+          +
+        </button>
+      </div>
+
+      <label class="jump" aria-label="Jump to page">
+        <span class="jump-label">Page</span>
+        <input
+          type="text"
+          inputmode="numeric"
+          aria-label="Page number"
+          bind:value={pageField}
+          on:focus={() => (isEditingPageField = true)}
+          on:blur={() => {
+            isEditingPageField = false;
+            submitPageJump();
+          }}
+          on:keydown={handlePageFieldKeydown}
+        />
+        <span class="jump-total">/ {normalizedPageCount}</span>
+      </label>
+
+      <button
+        class="btn theme"
+        on:click={() => dispatch("toggletheme")}
+        aria-pressed={themeDark}
+        title={themeDark ? "Switch to light theme" : "Switch to dark theme"}
+      >
+        {themeDark ? "Dark" : "Light"}
+      </button>
+    </div>
   </div>
 
-  <div class="right">
-    <button
-      class="icon"
-      on:click={() => dispatch("zoomout")}
-      disabled={loading}
-      title="Zoom out (Ctrl/Cmd+-)"
-      aria-label="Zoom out"
-    >
-      -
-    </button>
-    <button
-      class="zoom"
-      on:click={() => dispatch("zoomreset")}
-      disabled={loading}
-      title="Reset zoom (Ctrl/Cmd+0)"
-      aria-label="Reset zoom"
-    >
-      {Math.round(zoom * 100)}%
-    </button>
-    <button
-      class="icon"
-      on:click={() => dispatch("zoomin")}
-      disabled={loading}
-      title="Zoom in (Ctrl/Cmd++)"
-      aria-label="Zoom in"
-    >
-      +
-    </button>
-
-    <label class="jump" aria-label="Jump to page">
-      <input
-        type="text"
-        inputmode="numeric"
-        aria-label="Page number"
-        bind:value={pageField}
-        on:focus={() => (isEditingPageField = true)}
-        on:blur={() => {
-          isEditingPageField = false;
-          submitPageJump();
-        }}
-        on:keydown={handlePageFieldKeydown}
-      />
-      <span>/ {Math.max(1, pageCount)}</span>
-    </label>
-
-    <button
-      class="ghost"
-      on:click={() => dispatch("toggletheme")}
-      aria-pressed={themeDark}
-      title={themeDark ? "Switch to light theme" : "Switch to dark theme"}
-    >
-      Theme: {themeDark ? "Dark" : "Light"}
-    </button>
-  </div>
+  {#if loading}
+    <div class="loading-track" aria-hidden="true">
+      <span class="loading-bar"></span>
+    </div>
+  {/if}
 </header>
 
 <style>
   .toolbar {
     position: sticky;
     top: 0;
-    z-index: 20;
-    display: flex;
-    justify-content: space-between;
-    gap: 0.75rem;
-    align-items: center;
-    padding: 0.6rem 0.9rem;
+    z-index: 24;
     border-bottom: 1px solid var(--line);
-    background: var(--panel);
+    background:
+      linear-gradient(
+        180deg,
+        color-mix(in oklab, var(--panel) 92%, var(--bg)) 0%,
+        color-mix(in oklab, var(--panel) 84%, var(--bg)) 100%
+      );
+    box-shadow: 0 1px 0 rgb(255 255 255 / 0.08) inset;
   }
 
-  .left,
-  .right {
-    display: flex;
+  .toolbar-shell {
+    display: grid;
+    grid-template-columns: auto minmax(14rem, 1fr) auto;
     align-items: center;
-    gap: 0.45rem;
+    gap: 0.65rem;
+    padding: 0.52rem 0.75rem;
+  }
+
+  .group {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.24rem;
+    border: 1px solid color-mix(in oklab, var(--line) 76%, transparent);
+    background: color-mix(in oklab, var(--panel-raised) 88%, var(--bg));
+    border-radius: 0.82rem;
     min-width: 0;
   }
 
+  .group-view {
+    justify-self: end;
+  }
+
+  .zoom-group {
+    display: inline-flex;
+    gap: 0.35rem;
+  }
+
+  .title-group {
+    min-width: 0;
+    display: grid;
+    gap: 0.08rem;
+    padding: 0 0.32rem;
+  }
+
   .file {
-    max-width: 26rem;
+    margin: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    color: var(--text);
+    font-size: 0.95rem;
+    font-weight: 620;
+    letter-spacing: 0.01em;
+  }
+
+  .meta {
+    margin: 0;
     color: var(--muted);
-    font-size: 0.88rem;
+    font-size: 0.72rem;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
   }
 
   button,
@@ -167,80 +227,151 @@
     border: 1px solid var(--line);
     background: var(--panel-raised);
     color: var(--text);
-    border-radius: 9px;
-    height: 2.75rem;
+    border-radius: 0.62rem;
+    height: 2.32rem;
     font: inherit;
   }
 
-  button {
-    padding: 0 0.85rem;
+  .btn {
+    padding: 0 0.72rem;
     cursor: pointer;
+    font-size: 0.84rem;
+    letter-spacing: 0.01em;
   }
 
-  button:hover:not(:disabled) {
+  .btn.theme {
+    min-width: 4.35rem;
+  }
+
+  .btn:hover:not(:disabled) {
     border-color: color-mix(in oklab, var(--accent) 32%, var(--line));
   }
 
-  button:focus-visible,
+  .btn:focus-visible,
   input:focus-visible {
     outline: none;
     border-color: color-mix(in oklab, var(--accent) 60%, var(--line));
     box-shadow: 0 0 0 2px color-mix(in oklab, var(--accent) 28%, transparent);
   }
 
-  button:disabled {
+  .btn:disabled {
     cursor: not-allowed;
     opacity: 0.55;
   }
 
-  button[aria-pressed="true"] {
+  .btn[aria-pressed="true"] {
     border-color: color-mix(in oklab, var(--accent) 50%, var(--line));
     box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--accent) 34%, transparent);
   }
 
-  .ghost {
-    background: var(--panel-raised);
-  }
-
   .icon {
-    width: 2.75rem;
+    width: 2.32rem;
     padding: 0;
-    font-size: 1.2rem;
+    font-size: 1.05rem;
   }
 
   .zoom {
-    min-width: 5rem;
+    min-width: 4.6rem;
+    font-variant-numeric: tabular-nums;
   }
 
   .jump {
     display: inline-flex;
     align-items: center;
-    gap: 0.35rem;
+    gap: 0.28rem;
+    min-height: 2.32rem;
+    padding: 0 0.46rem;
+    border: 1px solid var(--line);
+    border-radius: 0.62rem;
+    background: var(--panel-raised);
     color: var(--muted);
   }
 
+  .jump:focus-within {
+    border-color: color-mix(in oklab, var(--accent) 60%, var(--line));
+    box-shadow: 0 0 0 2px color-mix(in oklab, var(--accent) 28%, transparent);
+  }
+
+  .jump-label {
+    font-size: 0.7rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
   .jump input {
-    width: 4rem;
+    width: 3.2rem;
     text-align: right;
-    padding: 0 0.45rem;
+    padding: 0;
+    border: none;
+    background: transparent;
+    height: auto;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .jump-total {
+    font-size: 0.79rem;
+  }
+
+  .loading-track {
+    position: relative;
+    height: 2px;
+    background: color-mix(in oklab, var(--line) 60%, transparent);
+    overflow: hidden;
+  }
+
+  .loading-bar {
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: 40%;
+    background: linear-gradient(90deg, transparent, var(--accent), transparent);
+    animation: toolbar-loading 1.1s ease-in-out infinite;
+  }
+
+  @keyframes toolbar-loading {
+    0% {
+      transform: translateX(-120%);
+    }
+
+    100% {
+      transform: translateX(280%);
+    }
   }
 
   @media (max-width: 860px) {
-    .toolbar {
-      flex-direction: column;
-      align-items: stretch;
+    .toolbar-shell {
+      grid-template-columns: 1fr;
+      gap: 0.42rem;
     }
 
-    .left,
-    .right {
+    .group {
       width: 100%;
       justify-content: flex-start;
       flex-wrap: wrap;
     }
 
-    .file {
-      max-width: 100%;
-      flex: 1;
+    .group-view {
+      justify-self: stretch;
+    }
+
+    .title-group {
+      order: -1;
+      padding: 0.1rem 0.2rem;
+    }
+
+    .jump {
+      margin-left: auto;
+    }
+
+    .btn.theme {
+      margin-left: auto;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .loading-bar {
+      animation: none;
+      width: 100%;
+      opacity: 0.55;
     }
   }
 </style>
