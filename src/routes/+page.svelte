@@ -39,10 +39,12 @@
 
   let loading = false;
   let errorMessage = "";
+  let errorDetails = "";
   let showSidebar = false;
   let showFindPanel = false;
   let findPageField = "1";
   let findPanelInput: HTMLInputElement | null = null;
+  let lastAttemptedPath: string | null = null;
   let activeOpenRequestId = 0;
   const appWindow = getCurrentWindow();
   const OPEN_PDF_TIMEOUT_MS = 45000;
@@ -211,6 +213,7 @@
 
         const message = error instanceof Error ? error.message : String(error);
         errorMessage = `Opened PDF but first page failed to render. ${message} Try reopening the file.`;
+        errorDetails = `Path: ${selectedPath}\nOpen attempt: ${attemptId}\nError: ${message}`;
 
         logPdfStage("ui_open_failed", {
           path: selectedPath,
@@ -222,9 +225,11 @@
 
   async function loadPdfPath(selectedPath: string): Promise<void> {
     const openRequestId = ++activeOpenRequestId;
+    lastAttemptedPath = selectedPath;
 
     loading = true;
     errorMessage = "";
+    errorDetails = "";
 
     console.info("[PiDF] opening selected PDF", { path: selectedPath });
 
@@ -273,6 +278,7 @@
       }
 
       errorMessage = `Unable to open PDF. ${message} Check that the file is readable and try again.`;
+      errorDetails = `Path: ${selectedPath}\nError: ${message}`;
       logPdfStage("ui_open_failed", {
         path: selectedPath,
         openAttemptId: nextSession?.diagnostics.openAttemptId ?? null,
@@ -302,6 +308,26 @@
     }
 
     await loadPdfPath(selectedPath);
+  }
+
+  async function retryLastOpen(): Promise<void> {
+    if (!lastAttemptedPath || loading) {
+      return;
+    }
+
+    await loadPdfPath(lastAttemptedPath);
+  }
+
+  async function copyErrorDetails(): Promise<void> {
+    if (!errorDetails) {
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(errorDetails);
+    } catch (error) {
+      console.warn("[PiDF] failed to copy error details", error);
+    }
   }
 
   function jumpToPage(page: number): void {
@@ -356,6 +382,10 @@
     applyInitialThemePreference();
 
     const onWindowKeydown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented) {
+        return;
+      }
+
       if (isOpenShortcut(event)) {
         event.preventDefault();
         void openPdf();
@@ -518,7 +548,14 @@
 
   {#if errorMessage}
     <div class="error" role="alert">
-      {errorMessage}
+      <p>{errorMessage}</p>
+      <div class="error-actions">
+        <button on:click={() => void retryLastOpen()} disabled={loading || !lastAttemptedPath}>
+          Retry
+        </button>
+        <button on:click={() => void openPdf()} disabled={loading}>Open Another PDF</button>
+        <button on:click={() => void copyErrorDetails()} disabled={!errorDetails}>Copy Details</button>
+      </div>
     </div>
   {/if}
 </main>
@@ -660,11 +697,49 @@
 
   .error {
     margin: 0;
-    padding: 0.62rem 0.9rem;
-    font-size: 0.88rem;
+    padding: 0.7rem 0.9rem;
+    display: grid;
+    gap: 0.55rem;
     color: #ffced1;
     background: rgb(123 24 24 / 0.92);
     border-top: 1px solid rgb(242 108 108 / 0.5);
+  }
+
+  .error p {
+    margin: 0;
+    font-size: 0.88rem;
+  }
+
+  .error-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.45rem;
+  }
+
+  .error-actions button {
+    border: 1px solid rgb(242 108 108 / 0.7);
+    border-radius: 0.5rem;
+    background: rgb(93 17 17 / 0.55);
+    color: #ffe0e3;
+    font: inherit;
+    font-size: 0.82rem;
+    min-height: 2rem;
+    padding: 0 0.75rem;
+    cursor: pointer;
+  }
+
+  .error-actions button:hover:not(:disabled) {
+    background: rgb(111 24 24 / 0.65);
+  }
+
+  .error-actions button:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px rgb(255 193 198 / 0.45);
+  }
+
+  .error-actions button:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
   }
 
   @media (max-width: 860px) {

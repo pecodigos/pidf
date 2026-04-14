@@ -419,24 +419,28 @@
 
     if (isZoomResetShortcut(event)) {
       event.preventDefault();
+      event.stopPropagation();
       dispatch("zoomchange", { zoom: 1 });
       return;
     }
 
     if (isViewerZoomInShortcut(event)) {
       event.preventDefault();
+      event.stopPropagation();
       dispatch("zoomchange", { zoom: clampZoom(zoom + ZOOM_STEP) });
       return;
     }
 
     if (isViewerZoomOutShortcut(event)) {
       event.preventDefault();
+      event.stopPropagation();
       dispatch("zoomchange", { zoom: clampZoom(zoom - ZOOM_STEP) });
       return;
     }
 
     if (isPageDownShortcut(event)) {
       event.preventDefault();
+      event.stopPropagation();
       container.scrollTop += container.clientHeight * 0.92;
       updateActiveFromScrollFallback();
       return;
@@ -444,6 +448,7 @@
 
     if (isPageUpShortcut(event)) {
       event.preventDefault();
+      event.stopPropagation();
       container.scrollTop -= container.clientHeight * 0.92;
       updateActiveFromScrollFallback();
       return;
@@ -451,6 +456,7 @@
 
     if (isHomeShortcut(event)) {
       event.preventDefault();
+      event.stopPropagation();
       container.scrollTop = 0;
       updateActiveFromScrollFallback();
       return;
@@ -458,6 +464,7 @@
 
     if (isEndShortcut(event)) {
       event.preventDefault();
+      event.stopPropagation();
       container.scrollTop = container.scrollHeight;
       updateActiveFromScrollFallback();
     }
