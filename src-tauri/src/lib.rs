@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Mutex, OnceLock};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tauri_plugin_updater::UpdaterExt;
 
 // ── helpers ──────────────────────────────────────────────────────────
 
@@ -1010,10 +1011,17 @@ mod tests {
     }
 }
 
+fn is_headless_update() -> bool {
+    std::env::args().any(|arg| arg == "update")
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let headless = is_headless_update();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             initial_pdf_path,
             pdf_open_info,
@@ -1021,6 +1029,52 @@ pub fn run() {
             pdf_close_session,
             trace_pdf_stage
         ])
+        .setup(move |app| {
+            if headless {
+                let handle = app.handle().clone();
+                let current_version = app.package_info().version.to_string();
+
+                tauri::async_runtime::block_on(async move {
+                    let updater = match handle.updater() {
+                        Ok(u) => u,
+                        Err(e) => {
+                            eprintln!("Updater init failed: {e}");
+                            std::process::exit(1);
+                        }
+                    };
+                    match updater.check().await {
+                        Ok(Some(update)) => {
+                            println!(
+                                "PiDF v{} → v{} available. Downloading and installing...",
+                                current_version, update.version
+                            );
+                            match update.download_and_install(
+                                |_downloaded, _total| {},
+                                || {},
+                            ).await {
+                                Ok(()) => {
+                                    println!("Update installed. Restart PiDF to use v{}.", update.version);
+                                    std::process::exit(0);
+                                }
+                                Err(e) => {
+                                    eprintln!("Install failed: {e}");
+                                    std::process::exit(1);
+                                }
+                            }
+                        }
+                        Ok(None) => {
+                            println!("PiDF is up to date (v{}).", current_version);
+                            std::process::exit(0);
+                        }
+                        Err(e) => {
+                            eprintln!("Update check failed: {e}");
+                            std::process::exit(1);
+                        }
+                    }
+                });
+            }
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

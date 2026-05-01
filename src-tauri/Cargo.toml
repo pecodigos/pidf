@@ -20,6 +20,8 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-dialog = "~2.6.0"
+tauri-plugin-updater = "2"
+serde_json = "1"
 pdfium-render = "0.8.37"
 serde = { version = "1", features = ["derive"] }
 image = { version = "0.25", default-features = false, features = ["jpeg"] }

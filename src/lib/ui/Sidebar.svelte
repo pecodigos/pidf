@@ -1,6 +1,7 @@
 <script lang="ts">
   import { createEventDispatcher } from "svelte";
   import { slide } from "svelte/transition";
+  import UpdateChecker from "$lib/ui/UpdateChecker.svelte";
 
   export let pageCount = 0;
   export let currentPage = 1;
@@ -49,6 +50,8 @@
       </button>
     {/each}
   </div>
+
+  <UpdateChecker />
 </aside>
 
 <style>
@@ -57,7 +60,7 @@
     border-right: 1px solid var(--line);
     background: var(--panel);
     display: grid;
-    grid-template-rows: auto 1fr;
+    grid-template-rows: auto 1fr auto;
     min-height: 0;
   }
 
