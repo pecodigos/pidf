@@ -9,6 +9,8 @@ export interface PdfOpenTrace {
   log: (stage: string, details?: StageDetails) => void;
 }
 
+const TRACE_STORAGE_KEY = "pidf.trace";
+
 let openAttemptCounter = 0;
 
 function safeJsonStringify(value: unknown): string {
@@ -19,11 +21,35 @@ function safeJsonStringify(value: unknown): string {
   }
 }
 
+function diagnosticsEnabled(): boolean {
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  try {
+    return window.localStorage.getItem(TRACE_STORAGE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function shouldLogStage(stage: string): boolean {
+  if (stage.includes("failed") || stage.includes("error")) {
+    return true;
+  }
+
+  return diagnosticsEnabled();
+}
+
 export function logPdfStage(
   stage: string,
   details: StageDetails = {},
   elapsedMs?: number,
 ): void {
+  if (!shouldLogStage(stage)) {
+    return;
+  }
+
   const timestamp = new Date().toISOString();
   const normalizedElapsedMs =
     typeof elapsedMs === "number" && Number.isFinite(elapsedMs)

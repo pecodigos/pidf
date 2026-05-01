@@ -15,16 +15,17 @@
   const dispatch = createEventDispatcher<{
     rendercommitted: { pageNumber: number };
     rendererror: { pageNumber: number; message: string };
+    heightchange: { pageNumber: number; cssWidth: number; cssHeight: number };
   }>();
 
   const DEFAULT_RATIO = Math.SQRT2;
   const RENDER_TIMEOUT_MS = 12000;
   const INITIAL_RENDER_DEBOUNCE_MS = 40;
   const VIEWPORT_PRIORITY_DISTANCE = 1;
-  const HIGH_PRIORITY_RENDER_DEBOUNCE_MS = 16;
-  const LOW_PRIORITY_RENDER_DEBOUNCE_MS = 220;
-  const RESIZE_RENDER_DEBOUNCE_MS = 90;
-  const OFFSCREEN_RESIZE_RENDER_DEBOUNCE_MS = 320;
+  const HIGH_PRIORITY_RENDER_DEBOUNCE_MS = 40;
+  const LOW_PRIORITY_RENDER_DEBOUNCE_MS = 150;
+  const RESIZE_RENDER_DEBOUNCE_MS = 45;
+  const OFFSCREEN_RESIZE_RENDER_DEBOUNCE_MS = 180;
   const ENABLE_PAGE_DIAGNOSTICS = false;
 
   let imageUrl = "";
@@ -33,8 +34,6 @@
   let errorMessage = "";
   let lastRenderKey = "";
   let activeRenderId = 0;
-  let activeBlobUrl = "";
-  let attemptedFallbackForUrl = "";
   let renderDebounce: ReturnType<typeof setTimeout> | null = null;
 
   function logRenderStage(stage: string, details: Record<string, unknown> = {}): void {
@@ -69,72 +68,14 @@
     return message.toLowerCase().includes("superseded");
   }
 
-  function clearActiveBlobUrl(): void {
-    if (!activeBlobUrl) {
-      return;
+  function renderPriority(distanceFromViewport: number, quality: "low" | "high"): number {
+    const normalizedDistance = Math.max(0, Math.floor(distanceFromViewport));
+
+    if (quality === "high") {
+      return Math.min(4096, normalizedDistance <= 1 ? normalizedDistance : 10 + normalizedDistance * 10);
     }
 
-    URL.revokeObjectURL(activeBlobUrl);
-    activeBlobUrl = "";
-  }
-
-  function setDisplayedImageUrl(nextUrl: string): void {
-    if (imageUrl !== nextUrl) {
-      clearActiveBlobUrl();
-    }
-
-    imageUrl = nextUrl;
-
-    if (nextUrl.startsWith("blob:")) {
-      activeBlobUrl = nextUrl;
-    }
-  }
-
-  async function fallbackToBlobUrl(sourceUrl: string, renderId: number): Promise<void> {
-    const response = await fetch(sourceUrl, { method: "GET" });
-    if (!response.ok) {
-      throw new Error(`Asset fetch failed with HTTP ${response.status}.`);
-    }
-
-    const blob = await response.blob();
-    if (!blob.size) {
-      throw new Error("Asset fetch returned an empty payload.");
-    }
-
-    if (renderId !== activeRenderId) {
-      return;
-    }
-
-    setDisplayedImageUrl(URL.createObjectURL(blob));
-  }
-
-  function handleImageError(): void {
-    if (!imageUrl || imageUrl.startsWith("blob:") || attemptedFallbackForUrl === imageUrl) {
-      return;
-    }
-
-    const failedUrl = imageUrl;
-    const renderId = activeRenderId;
-    attemptedFallbackForUrl = failedUrl;
-
-    void fallbackToBlobUrl(failedUrl, renderId).catch((error) => {
-      if (renderId !== activeRenderId) {
-        return;
-      }
-
-      const describedError = describeError(error);
-      errorMessage = `Page ${pageNumber}: ${describedError.message}`;
-
-      dispatch("rendererror", {
-        pageNumber,
-        message: describedError.message,
-      });
-
-      logRenderStage("page_render_failed", {
-        targetWidth: Math.max(1, Math.round(targetWidth)),
-        message: describedError.message,
-      });
-    });
+    return Math.min(4096, normalizedDistance <= 1 ? 80 + normalizedDistance : 160 + normalizedDistance * 14);
   }
 
   async function renderPage(): Promise<void> {
@@ -147,21 +88,39 @@
     const lowResWidth = Math.max(1, Math.round(targetWidth / 3));
     const highResKey = cacheKey(pageNumber, highResWidth);
     const lowResKey = cacheKey(pageNumber, lowResWidth);
-    if (highResKey === lastRenderKey && !errorMessage) {
+
+    const renderId = ++activeRenderId;
+    const distanceFromViewport = Math.abs(currentPage - pageNumber);
+    const lowResRenderPriority = renderPriority(distanceFromViewport, "low");
+    const highResRenderPriority = renderPriority(distanceFromViewport, "high");
+    const isViewportPage = distanceFromViewport <= VIEWPORT_PRIORITY_DISTANCE;
+
+    if (
+      !errorMessage &&
+      (highResKey === lastRenderKey ||
+        (distanceFromViewport > VIEWPORT_PRIORITY_DISTANCE && lowResKey === lastRenderKey))
+    ) {
       return;
     }
 
-    const renderId = ++activeRenderId;
     errorMessage = "";
 
-    // Try low-res first if not already showing high-res
+    // Try low-res first only for offscreen pages.
     let didShowLowRes = false;
     const tryShowLowRes = () => {
+      if (isViewportPage) {
+        return;
+      }
+
       const cachedLow = cache.get(lowResKey);
       if (cachedLow && lastRenderKey !== highResKey) {
-        setDisplayedImageUrl(cachedLow.imageUrl);
+        imageUrl = cachedLow.imageUrl;
         cssWidth = cachedLow.cssWidth;
-        cssHeight = cachedLow.cssHeight;
+        if (cssHeight !== cachedLow.cssHeight) {
+          cssHeight = cachedLow.cssHeight;
+          dispatch("heightchange", { pageNumber, cssWidth, cssHeight });
+        }
+        lastRenderKey = lowResKey;
         didShowLowRes = true;
       }
     };
@@ -180,47 +139,55 @@
         if (renderId !== activeRenderId) {
           return;
         }
-        attemptedFallbackForUrl = "";
-        setDisplayedImageUrl(cachedHigh.imageUrl);
+        imageUrl = cachedHigh.imageUrl;
         cssWidth = cachedHigh.cssWidth;
-        cssHeight = cachedHigh.cssHeight;
+        if (cssHeight !== cachedHigh.cssHeight) {
+          cssHeight = cachedHigh.cssHeight;
+          dispatch("heightchange", { pageNumber, cssWidth, cssHeight });
+        }
         dispatch("rendercommitted", { pageNumber });
         lastRenderKey = highResKey;
         return;
       }
 
-      // If not, render low-res immediately if not already shown
-      if (!didShowLowRes) {
+      if (!didShowLowRes && !isViewportPage) {
         // Only render low-res if not already showing it
         const renderedLow = await withTimeout(
-          session.renderPage(pageNumber, lowResWidth, 0),
+          session.renderPage(pageNumber, lowResWidth, lowResRenderPriority),
           RENDER_TIMEOUT_MS,
           `Backend page render timed out after ${RENDER_TIMEOUT_MS}ms (low-res).`,
         );
         if (renderId !== activeRenderId) return;
-        setDisplayedImageUrl(renderedLow.imageUrl);
+        imageUrl = renderedLow.imageUrl;
         cssWidth = renderedLow.cssWidth;
-        cssHeight = renderedLow.cssHeight;
+        if (cssHeight !== renderedLow.cssHeight) {
+          cssHeight = renderedLow.cssHeight;
+          dispatch("heightchange", { pageNumber, cssWidth, cssHeight });
+        }
         cache.set(lowResKey, {
           imageUrl: renderedLow.imageUrl,
           cssWidth: renderedLow.cssWidth,
           cssHeight: renderedLow.cssHeight,
         });
+        lastRenderKey = lowResKey;
       }
 
-      // Schedule high-res render after a short delay (settle)
-      await new Promise((resolve) => setTimeout(resolve, 120));
-      if (renderId !== activeRenderId) return;
+      if (!isViewportPage) {
+        return;
+      }
 
       const renderedHigh = await withTimeout(
-        session.renderPage(pageNumber, highResWidth, 0),
+        session.renderPage(pageNumber, highResWidth, highResRenderPriority),
         RENDER_TIMEOUT_MS,
         `Backend page render timed out after ${RENDER_TIMEOUT_MS}ms (high-res).`,
       );
       if (renderId !== activeRenderId) return;
-      setDisplayedImageUrl(renderedHigh.imageUrl);
+      imageUrl = renderedHigh.imageUrl;
       cssWidth = renderedHigh.cssWidth;
-      cssHeight = renderedHigh.cssHeight;
+      if (cssHeight !== renderedHigh.cssHeight) {
+        cssHeight = renderedHigh.cssHeight;
+        dispatch("heightchange", { pageNumber, cssWidth, cssHeight });
+      }
       cache.set(highResKey, {
         imageUrl: renderedHigh.imageUrl,
         cssWidth: renderedHigh.cssWidth,
@@ -230,7 +197,6 @@
       lastRenderKey = highResKey;
       return;
 
-      // (Old single-pass logic removed; diagnostics for quality ladder below)
     } catch (error) {
       if (renderId !== activeRenderId) {
         return;
@@ -256,7 +222,6 @@
       console.error("[PiDF] page render failed", {
         pageNumber,
         targetWidth: highResWidth,
-        imageUrl,
         error: describedError,
       });
     }
@@ -298,6 +263,12 @@
   }
 
   $: if (session && targetWidth > 0 && currentPage >= 0) {
+    const rawTarget = Math.max(1, Math.round(targetWidth));
+    if (Math.abs(cssWidth - rawTarget) >= 1 && imageUrl) {
+      const currentRatio = cssHeight / Math.max(1, cssWidth);
+      cssWidth = rawTarget;
+      cssHeight = rawTarget * currentRatio;
+    }
     scheduleRender();
   }
 
@@ -308,8 +279,6 @@
       clearTimeout(renderDebounce);
       renderDebounce = null;
     }
-
-    clearActiveBlobUrl();
   });
 </script>
 
@@ -322,7 +291,6 @@
       loading="lazy"
       decoding="async"
       draggable="false"
-      on:error={handleImageError}
     />
   {:else}
     <div class="placeholder" style={`height:${cssHeight}px`} aria-hidden="true"></div>
@@ -336,10 +304,12 @@
 <style>
   .page {
     position: relative;
-    border: 1px solid rgb(0 0 0 / 0.14);
-    border-radius: 0.2rem;
+    box-sizing: border-box;
+    border-radius: 0;
     overflow: hidden;
     background: white;
+    box-shadow: 0 8px 24px rgb(0 0 0 / 0.06);
+    transform: translateZ(0);
   }
 
   .page-image {
@@ -347,11 +317,18 @@
     width: 100%;
     height: auto;
     background: white;
+    transform: translateZ(0);
   }
 
   .placeholder {
     width: 100%;
     background: white;
+    animation: viewer-pulse 2s ease-in-out infinite alternate;
+  }
+
+  @keyframes viewer-pulse {
+    0% { opacity: 0.5; }
+    100% { opacity: 0.95; }
   }
 
   .error {
@@ -365,5 +342,12 @@
     border-color: rgb(203 98 98 / 0.8);
     border: 1px solid;
     border-radius: 0.24rem;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .placeholder {
+      animation: none;
+      opacity: 0.85;
+    }
   }
 </style>

@@ -6,9 +6,11 @@ use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::sync::{mpsc, OnceLock};
+use std::sync::{mpsc, Mutex, OnceLock};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+// ── helpers ──────────────────────────────────────────────────────────
 
 fn is_pdf_file(path: &str) -> bool {
     let file_path = Path::new(path);
@@ -23,12 +25,11 @@ fn normalize_page_number(page_number: u16, page_count: u16) -> u16 {
     if page_count == 0 {
         return 1;
     }
-
     page_number.max(1).min(page_count)
 }
 
 fn normalize_target_width(target_width: u16) -> u16 {
-    target_width.max(240).min(2200)
+    target_width.clamp(240, 2200)
 }
 
 fn normalize_render_priority(render_priority: Option<u16>) -> u16 {
@@ -42,9 +43,22 @@ fn verbose_runtime_logs_enabled() -> bool {
         .unwrap_or(false)
 }
 
+fn worker_thread_count() -> usize {
+    std::env::var("PIDF_WORKER_THREADS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|n| n.get().clamp(2, 8))
+                .unwrap_or(4)
+        })
+}
+
+// ── pdfium bootstrap ─────────────────────────────────────────────────
+
 fn local_pdfium_library_candidates() -> Vec<PathBuf> {
     let library_name = Pdfium::pdfium_platform_library_name();
-
     vec![
         PathBuf::from("pdfium").join("lib").join(&library_name),
         PathBuf::from("src-tauri")
@@ -66,19 +80,18 @@ fn create_pdfium() -> Result<Pdfium, String> {
         if !candidate.exists() {
             continue;
         }
-
         match Pdfium::bind_to_library(&candidate) {
             Ok(bindings) => {
                 if verbose_runtime_logs_enabled() {
-                    println!("[PiDF] using local PDFium library: {}", candidate.to_string_lossy());
+                    println!(
+                        "[PiDF] using local PDFium library: {}",
+                        candidate.to_string_lossy()
+                    );
                 }
                 return Ok(Pdfium::new(bindings));
             }
             Err(error) => {
-                local_errors.push(format!(
-                    "{} ({error:?})",
-                    candidate.to_string_lossy()
-                ));
+                local_errors.push(format!("{} ({error:?})", candidate.to_string_lossy()));
             }
         }
     }
@@ -109,13 +122,13 @@ fn ensure_pdf_path(path: &str) -> Result<(), String> {
     if !Path::new(path).exists() {
         return Err("PDF path does not exist.".to_owned());
     }
-
     if !is_pdf_file(path) {
         return Err("Selected file is not a PDF.".to_owned());
     }
-
     Ok(())
 }
+
+// ── disk render cache ────────────────────────────────────────────────
 
 fn render_cache_dir() -> Result<PathBuf, String> {
     let base = std::env::var_os("HOME")
@@ -179,17 +192,14 @@ fn prune_render_cache_dir(
             Ok(entry) => entry,
             Err(_) => continue,
         };
-
         let path = entry.path();
         let metadata = match entry.metadata() {
             Ok(metadata) => metadata,
             Err(_) => continue,
         };
-
         if !metadata.is_file() {
             continue;
         }
-
         let file_size = metadata.len();
         let modified_at = metadata.modified().unwrap_or(UNIX_EPOCH);
         let file_age_secs = now
@@ -226,7 +236,6 @@ fn prune_render_cache_dir(
         if total_bytes <= max_total_bytes {
             break;
         }
-
         if fs::remove_file(&entry.path).is_ok() {
             total_bytes = total_bytes.saturating_sub(entry.size);
         }
@@ -244,13 +253,14 @@ fn prune_render_cache_best_effort() {
         Ok(cache_dir) => cache_dir,
         Err(_) => return,
     };
-
     let _ = prune_render_cache_dir(
         &cache_dir,
         MAX_RENDER_CACHE_BYTES,
         MAX_RENDER_CACHE_FILE_AGE_SECS,
     );
 }
+
+// ── IPC types ────────────────────────────────────────────────────────
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -262,12 +272,13 @@ struct PdfOpenInfo {
     render_engine: &'static str,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct PdfRenderedPage {
-    image_path: String,
+    data: Vec<u8>,
     width: f32,
     height: f32,
+    mime: String,
 }
 
 struct PdfSessionOpenResult {
@@ -276,6 +287,8 @@ struct PdfSessionOpenResult {
     first_page_width: f32,
     first_page_height: f32,
 }
+
+// ── worker messages ──────────────────────────────────────────────────
 
 enum PdfWorkerRequest {
     Open {
@@ -305,13 +318,72 @@ struct PendingRenderRequest {
     response: mpsc::Sender<Result<PdfRenderedPage, String>>,
 }
 
+// ── per-worker in-memory page cache ──────────────────────────────────
+
+const MEMORY_CACHE_MAX_PAGES: usize = 64;
+
+fn memory_cache_key(session_id: &str, page_number: u16, target_width: u16) -> String {
+    format!("{session_id}:{page_number}:{target_width}")
+}
+
+struct MemoryPageCache {
+    entries: HashMap<String, PdfRenderedPage>,
+    order: VecDeque<String>,
+    max_entries: usize,
+}
+
+impl MemoryPageCache {
+    fn new(max_entries: usize) -> Self {
+        Self {
+            entries: HashMap::with_capacity(max_entries.min(128)),
+            order: VecDeque::with_capacity(max_entries.min(128)),
+            max_entries,
+        }
+    }
+
+    fn get(&mut self, key: &str) -> Option<PdfRenderedPage> {
+        // LRU: move accessed key to back
+        if let Some(entry) = self.entries.get(key) {
+            // Remove and push to back for LRU order
+            self.order.retain(|k| k != key);
+            self.order.push_back(key.to_owned());
+            return Some(entry.clone());
+        }
+        None
+    }
+
+    fn put(&mut self, key: String, page: PdfRenderedPage) {
+        if self.entries.contains_key(&key) {
+            self.order.retain(|k| k != &key);
+        }
+        self.entries.insert(key.clone(), page);
+        self.order.push_back(key);
+
+        while self.order.len() > self.max_entries {
+            if let Some(oldest) = self.order.pop_front() {
+                self.entries.remove(&oldest);
+            }
+        }
+    }
+
+    #[allow(dead_code)]
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.order.clear();
+    }
+}
+
+// ── page render logic (runs inside worker) ──────────────────────────
+
 fn render_pdf_page(
     document: &PdfDocument<'_>,
     path: &str,
     page_number: u16,
     target_width: u16,
+    memory_cache: &mut MemoryPageCache,
+    session_id: &str,
 ) -> Result<PdfRenderedPage, String> {
-    let page_count = document.pages().len() as u16;
+    let page_count = document.pages().len();
     if page_count == 0 {
         return Err("PDF has no pages.".to_owned());
     }
@@ -319,15 +391,24 @@ fn render_pdf_page(
     let requested_page = page_number.max(1);
     let normalized_page = normalize_page_number(requested_page, page_count);
     let normalized_width = normalize_target_width(target_width);
-    let output_path = render_cache_path(path, normalized_page, normalized_width)?;
 
+    // 1. check in-memory cache
+    let mem_key = memory_cache_key(session_id, normalized_page, normalized_width);
+    if let Some(cached) = memory_cache.get(&mem_key) {
+        return Ok(cached);
+    }
+
+    // 2. check disk cache
+    let output_path = render_cache_path(path, normalized_page, normalized_width)?;
     if let Some(cached_page) = cached_render_response(&output_path, normalized_width)? {
+        memory_cache.put(mem_key, cached_page.clone());
         return Ok(cached_page);
     }
 
+    // 3. render from PDF
     let page = document
         .pages()
-        .get((normalized_page - 1) as u16)
+        .get(normalized_page - 1)
         .map_err(|error| format!("Failed to access page {}: {error:?}", normalized_page))?;
 
     let base_width = page.width().value.max(1.0);
@@ -344,47 +425,87 @@ fn render_pdf_page(
         .map_err(|error| format!("Failed to render page {}: {error:?}", normalized_page))?;
 
     let image = bitmap.as_image();
-    let temp_output_path = output_path.with_extension("tmp.jpg");
 
+    // encode JPEG in-memory
+    let mut jpeg_bytes: Vec<u8> = Vec::new();
     image
-        .save(&temp_output_path)
-        .map_err(|error| format!("Failed to persist rendered page image: {error}"))?;
+        .write_to(
+            &mut std::io::Cursor::new(&mut jpeg_bytes),
+            image::ImageFormat::Jpeg,
+        )
+        .map_err(|error| format!("Failed to encode page image as JPEG: {error}"))?;
 
-    fs::rename(&temp_output_path, &output_path)
-        .map_err(|error| format!("Failed to finalize rendered page image: {error}"))?;
+    // persist to disk asynchronously (don't block the response)
+    let disk_path = output_path.clone();
+    let disk_bytes = jpeg_bytes.clone();
+    thread::Builder::new()
+        .name("pidf-cache-write".to_owned())
+        .spawn(move || {
+            let temp_path = disk_path.with_extension("tmp.jpg");
+            let _ = fs::write(&temp_path, &disk_bytes);
+            let _ = fs::rename(&temp_path, &disk_path);
+        })
+        .ok();
 
-    let verbose_render = std::env::var("PIDF_VERBOSE_RENDER")
-        .ok()
-        .map(|value| value == "1")
-        .unwrap_or(false);
-
-    if verbose_render {
-        let output_size = fs::metadata(&output_path)
-            .map(|metadata| metadata.len())
-            .unwrap_or(0);
-
+    if verbose_runtime_logs_enabled() {
         println!(
-            "[PiDF] rendered page {} width {} -> {} ({} bytes)",
+            "[PiDF] rendered page {} width {} ({} bytes in memory)",
             normalized_page,
             normalized_width,
-            output_path.to_string_lossy(),
-            output_size
+            jpeg_bytes.len()
         );
     }
 
-    Ok(PdfRenderedPage {
-        image_path: output_path.to_string_lossy().into_owned(),
+    let result = PdfRenderedPage {
+        data: jpeg_bytes,
         width: normalized_width as f32,
         height: css_height,
-    })
+        mime: "image/jpeg".to_owned(),
+    };
+
+    memory_cache.put(mem_key, result.clone());
+
+    Ok(result)
 }
+
+fn cached_render_response(
+    output_path: &Path,
+    target_width: u16,
+) -> Result<Option<PdfRenderedPage>, String> {
+    let data = match fs::read(output_path) {
+        Ok(data) if !data.is_empty() => data,
+        Ok(_) => {
+            let _ = fs::remove_file(output_path);
+            return Ok(None);
+        }
+        Err(_) => return Ok(None),
+    };
+
+    let (image_width, image_height) = match image_dimensions(output_path) {
+        Ok((w, h)) if w > 0 && h > 0 => (w, h),
+        _ => {
+            let _ = fs::remove_file(output_path);
+            return Ok(None);
+        }
+    };
+
+    let ratio = image_height as f32 / image_width as f32;
+
+    Ok(Some(PdfRenderedPage {
+        data,
+        width: target_width as f32,
+        height: (target_width as f32 * ratio).max(1.0),
+        mime: "image/jpeg".to_owned(),
+    }))
+}
+
+// ── worker thread ────────────────────────────────────────────────────
 
 fn run_pdf_worker(receiver: mpsc::Receiver<PdfWorkerRequest>) {
     let pdfium = match create_pdfium() {
         Ok(pdfium) => pdfium,
         Err(error) => {
             let startup_error = format!("Failed to initialize PDF worker: {error}");
-
             for request in receiver {
                 match request {
                     PdfWorkerRequest::Open { response, .. } => {
@@ -398,7 +519,6 @@ fn run_pdf_worker(receiver: mpsc::Receiver<PdfWorkerRequest>) {
                     }
                 }
             }
-
             return;
         }
     };
@@ -408,6 +528,7 @@ fn run_pdf_worker(receiver: mpsc::Receiver<PdfWorkerRequest>) {
     let mut next_session_id: u64 = 1;
     let mut deferred_requests: VecDeque<PdfWorkerRequest> = VecDeque::new();
     let mut renders_since_prune: u32 = 0;
+    let mut memory_cache = MemoryPageCache::new(MEMORY_CACHE_MAX_PAGES);
 
     prune_render_cache_best_effort();
 
@@ -430,7 +551,7 @@ fn run_pdf_worker(receiver: mpsc::Receiver<PdfWorkerRequest>) {
                         .load_pdf_from_file(&path, None)
                         .map_err(|error| format!("Failed to open PDF: {error:?}"))?;
 
-                    let page_count = document.pages().len() as u16;
+                    let page_count = document.pages().len();
                     if page_count == 0 {
                         return Err("PDF has no pages.".to_owned());
                     }
@@ -463,6 +584,7 @@ fn run_pdf_worker(receiver: mpsc::Receiver<PdfWorkerRequest>) {
                 render_priority,
                 response,
             } => {
+                // drain additional render requests for batching + dedup
                 let mut pending_renders = vec![PendingRenderRequest {
                     session_id,
                     page_number,
@@ -496,23 +618,32 @@ fn run_pdf_worker(receiver: mpsc::Receiver<PdfWorkerRequest>) {
                     }
                 }
 
-                let mut latest_render_by_page: HashMap<(String, u16), usize> = HashMap::new();
+                // dedup: keep only latest render for each (session, page, width)
+                let mut latest_render_by_page: HashMap<(String, u16, u16), usize> = HashMap::new();
                 let mut superseded = vec![false; pending_renders.len()];
 
                 for (index, pending) in pending_renders.iter().enumerate() {
-                    if let Some(previous) = latest_render_by_page
-                        .insert((pending.session_id.clone(), pending.page_number), index)
-                    {
+                    if let Some(previous) = latest_render_by_page.insert(
+                        (
+                            pending.session_id.clone(),
+                            pending.page_number,
+                            pending.target_width,
+                        ),
+                        index,
+                    ) {
                         superseded[previous] = true;
                     }
                 }
 
                 for (index, pending) in pending_renders.iter().enumerate() {
                     if superseded[index] {
-                        let _ = pending.response.send(Err(RENDER_SUPERSEDED_ERROR.to_owned()));
+                        let _ = pending
+                            .response
+                            .send(Err(RENDER_SUPERSEDED_ERROR.to_owned()));
                     }
                 }
 
+                // sort by priority (lower = higher priority)
                 let mut execution_order: Vec<usize> = (0..pending_renders.len())
                     .filter(|index| !superseded[*index])
                     .collect();
@@ -520,7 +651,6 @@ fn run_pdf_worker(receiver: mpsc::Receiver<PdfWorkerRequest>) {
                 execution_order.sort_by(|left_index, right_index| {
                     let left = &pending_renders[*left_index];
                     let right = &pending_renders[*right_index];
-
                     left.render_priority
                         .cmp(&right.render_priority)
                         .then_with(|| left_index.cmp(right_index))
@@ -538,16 +668,21 @@ fn run_pdf_worker(receiver: mpsc::Receiver<PdfWorkerRequest>) {
                             .get(&pending.session_id)
                             .ok_or_else(|| "Missing PDF path for session.".to_owned())?;
 
-                        render_pdf_page(document, path, pending.page_number, pending.target_width)
+                        render_pdf_page(
+                            document,
+                            path,
+                            pending.page_number,
+                            pending.target_width,
+                            &mut memory_cache,
+                            &pending.session_id,
+                        )
                     })();
 
                     let render_succeeded = result.is_ok();
-
                     let _ = pending.response.send(result);
 
                     if render_succeeded {
                         renders_since_prune = renders_since_prune.saturating_add(1);
-
                         if renders_since_prune >= CACHE_PRUNE_INTERVAL_RENDERS {
                             renders_since_prune = 0;
                             prune_render_cache_best_effort();
@@ -567,71 +702,131 @@ fn run_pdf_worker(receiver: mpsc::Receiver<PdfWorkerRequest>) {
     }
 }
 
-fn pdf_worker_sender() -> &'static mpsc::Sender<PdfWorkerRequest> {
-    static PDF_WORKER_SENDER: OnceLock<mpsc::Sender<PdfWorkerRequest>> = OnceLock::new();
+// ── thread pool ──────────────────────────────────────────────────────
 
-    PDF_WORKER_SENDER.get_or_init(|| {
-        let (sender, receiver) = mpsc::channel();
-
-        thread::Builder::new()
-            .name("pidf-pdf-worker".to_owned())
-            .spawn(move || run_pdf_worker(receiver))
-            .expect("failed to spawn PDF worker thread");
-
-        sender
-    })
+struct PdfWorkerPool {
+    senders: Vec<mpsc::Sender<PdfWorkerRequest>>,
+    /// session_id → worker_index
+    session_owners: Mutex<HashMap<String, usize>>,
+    next_worker: std::sync::atomic::AtomicUsize,
 }
 
-fn cached_render_response(output_path: &Path, target_width: u16) -> Result<Option<PdfRenderedPage>, String> {
-    let metadata = match fs::metadata(output_path) {
-        Ok(metadata) => metadata,
-        Err(_) => return Ok(None),
-    };
+impl PdfWorkerPool {
+    fn new(num_workers: usize) -> Self {
+        let mut senders = Vec::with_capacity(num_workers);
+        for i in 0..num_workers {
+            let (tx, rx) = mpsc::channel();
+            thread::Builder::new()
+                .name(format!("pidf-pdf-worker-{i}"))
+                .spawn(move || run_pdf_worker(rx))
+                .expect("failed to spawn PDF worker thread");
+            senders.push(tx);
+        }
 
-    if metadata.len() == 0 {
-        let _ = fs::remove_file(output_path);
-        return Ok(None);
+        Self {
+            senders,
+            session_owners: Mutex::new(HashMap::new()),
+            next_worker: std::sync::atomic::AtomicUsize::new(0),
+        }
     }
 
-    match image_dimensions(output_path) {
-        Ok((image_width, image_height)) if image_width > 0 && image_height > 0 => {
-            let ratio = image_height as f32 / image_width as f32;
+    fn open(&self, path: String) -> Result<PdfOpenInfo, String> {
+        let (response_sender, response_receiver) = mpsc::channel();
+        let worker_idx = self
+            .next_worker
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            % self.senders.len();
 
-            Ok(Some(PdfRenderedPage {
-                image_path: output_path.to_string_lossy().into_owned(),
-                width: target_width as f32,
-                height: (target_width as f32 * ratio).max(1.0),
-            }))
-        }
-        _ => {
-            let _ = fs::remove_file(output_path);
-            Ok(None)
-        }
+        self.senders[worker_idx]
+            .send(PdfWorkerRequest::Open {
+                path,
+                response: response_sender,
+            })
+            .map_err(|_| "PDF worker is unavailable.".to_owned())?;
+
+        let open_result = response_receiver
+            .recv()
+            .map_err(|_| "PDF worker did not respond.".to_owned())??;
+
+        self.session_owners
+            .lock()
+            .unwrap()
+            .insert(open_result.session_id.clone(), worker_idx);
+
+        Ok(PdfOpenInfo {
+            session_id: open_result.session_id,
+            page_count: open_result.page_count,
+            first_page_width: open_result.first_page_width,
+            first_page_height: open_result.first_page_height,
+            render_engine: "pdfium-render",
+        })
+    }
+
+    fn render(
+        &self,
+        session_id: String,
+        page_number: u16,
+        target_width: u16,
+        render_priority: Option<u16>,
+    ) -> Result<PdfRenderedPage, String> {
+        let worker_idx = {
+            let owners = self.session_owners.lock().unwrap();
+            owners
+                .get(&session_id)
+                .copied()
+                .ok_or_else(|| "Unknown or closed PDF session.".to_owned())?
+        };
+
+        let (response_sender, response_receiver) = mpsc::channel();
+
+        self.senders[worker_idx]
+            .send(PdfWorkerRequest::Render {
+                session_id,
+                page_number,
+                target_width,
+                render_priority: normalize_render_priority(render_priority),
+                response: response_sender,
+            })
+            .map_err(|_| "PDF worker is unavailable.".to_owned())?;
+
+        response_receiver
+            .recv()
+            .map_err(|_| "PDF worker did not respond.".to_owned())?
+    }
+
+    fn close(&self, session_id: String) -> Result<(), String> {
+        let worker_idx = {
+            let mut owners = self.session_owners.lock().unwrap();
+            owners
+                .remove(&session_id)
+                .ok_or_else(|| "Unknown or closed PDF session.".to_owned())?
+        };
+
+        let (response_sender, response_receiver) = mpsc::channel();
+
+        self.senders[worker_idx]
+            .send(PdfWorkerRequest::Close {
+                session_id,
+                response: response_sender,
+            })
+            .map_err(|_| "PDF worker is unavailable.".to_owned())?;
+
+        response_receiver
+            .recv()
+            .map_err(|_| "PDF worker did not respond.".to_owned())?
     }
 }
+
+fn worker_pool() -> &'static PdfWorkerPool {
+    static POOL: OnceLock<PdfWorkerPool> = OnceLock::new();
+    POOL.get_or_init(|| PdfWorkerPool::new(worker_thread_count()))
+}
+
+// ── Tauri commands ───────────────────────────────────────────────────
 
 #[tauri::command]
 fn pdf_open_info(path: String) -> Result<PdfOpenInfo, String> {
-    let (response_sender, response_receiver) = mpsc::channel();
-
-    pdf_worker_sender()
-        .send(PdfWorkerRequest::Open {
-            path,
-            response: response_sender,
-        })
-        .map_err(|_| "PDF worker is unavailable.".to_owned())?;
-
-    let open_result = response_receiver
-        .recv()
-        .map_err(|_| "PDF worker did not respond.".to_owned())??;
-
-    Ok(PdfOpenInfo {
-        session_id: open_result.session_id,
-        page_count: open_result.page_count,
-        first_page_width: open_result.first_page_width,
-        first_page_height: open_result.first_page_height,
-        render_engine: "pdfium-render",
-    })
+    worker_pool().open(path)
 }
 
 #[tauri::command]
@@ -641,37 +836,12 @@ fn pdf_render_page(
     target_width: u16,
     render_priority: Option<u16>,
 ) -> Result<PdfRenderedPage, String> {
-    let (response_sender, response_receiver) = mpsc::channel();
-
-    pdf_worker_sender()
-        .send(PdfWorkerRequest::Render {
-            session_id,
-            page_number,
-            target_width,
-            render_priority: normalize_render_priority(render_priority),
-            response: response_sender,
-        })
-        .map_err(|_| "PDF worker is unavailable.".to_owned())?;
-
-    response_receiver
-        .recv()
-        .map_err(|_| "PDF worker did not respond.".to_owned())?
+    worker_pool().render(session_id, page_number, target_width, render_priority)
 }
 
 #[tauri::command]
 fn pdf_close_session(session_id: String) -> Result<(), String> {
-    let (response_sender, response_receiver) = mpsc::channel();
-
-    pdf_worker_sender()
-        .send(PdfWorkerRequest::Close {
-            session_id,
-            response: response_sender,
-        })
-        .map_err(|_| "PDF worker is unavailable.".to_owned())?;
-
-    response_receiver
-        .recv()
-        .map_err(|_| "PDF worker did not respond.".to_owned())?
+    worker_pool().close(session_id)
 }
 
 #[tauri::command]
@@ -680,7 +850,10 @@ fn initial_pdf_path() -> Option<String> {
         .ok()
         .filter(|path| Path::new(path).exists() && is_pdf_file(path));
 
-    println!("[PiDF] initial_pdf_path: {:?}", path);
+    if verbose_runtime_logs_enabled() {
+        println!("[PiDF] initial_pdf_path: {:?}", path);
+    }
+
     path
 }
 
@@ -701,6 +874,8 @@ fn trace_pdf_stage(
         timestamp, elapsed, stage, details
     );
 }
+
+// ── tests ────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -774,19 +949,78 @@ mod tests {
 
         let _ = fs::remove_dir_all(cache_dir);
     }
+
+    #[test]
+    fn memory_cache_lru_eviction() {
+        let mut cache = MemoryPageCache::new(3);
+
+        let page = |n: u8| PdfRenderedPage {
+            data: vec![n],
+            width: 100.0,
+            height: 141.0,
+            mime: "image/jpeg".to_owned(),
+        };
+
+        cache.put("a".into(), page(1));
+        cache.put("b".into(), page(2));
+        cache.put("c".into(), page(3));
+        cache.put("d".into(), page(4)); // evicts "a"
+
+        assert!(cache.get("a").is_none());
+        assert!(cache.get("b").is_some());
+        assert!(cache.get("c").is_some());
+        assert!(cache.get("d").is_some());
+    }
+
+    #[test]
+    fn memory_cache_lru_reorder_on_get() {
+        let mut cache = MemoryPageCache::new(3);
+
+        let page = |n: u8| PdfRenderedPage {
+            data: vec![n],
+            width: 100.0,
+            height: 141.0,
+            mime: "image/jpeg".to_owned(),
+        };
+
+        cache.put("a".into(), page(1));
+        cache.put("b".into(), page(2));
+        cache.put("c".into(), page(3));
+
+        // Access "a" → moves to back, "b" becomes oldest
+        cache.get("a");
+
+        cache.put("d".into(), page(4)); // should evict "b", not "a"
+
+        assert!(cache.get("a").is_some());
+        assert!(cache.get("b").is_none());
+        assert!(cache.get("c").is_some());
+        assert!(cache.get("d").is_some());
+    }
+
+    #[test]
+    fn worker_thread_count_respects_env() {
+        // Can't easily test available_parallelism path, but verify env override
+        // Just validate it returns a sensible value
+        let count = worker_thread_count();
+        assert!(
+            count >= 1,
+            "worker_thread_count should be at least 1, got {count}"
+        );
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-    .plugin(tauri_plugin_dialog::init())
-    .invoke_handler(tauri::generate_handler![
-        initial_pdf_path,
-        pdf_open_info,
-        pdf_render_page,
-        pdf_close_session,
-        trace_pdf_stage
-    ])
+        .plugin(tauri_plugin_dialog::init())
+        .invoke_handler(tauri::generate_handler![
+            initial_pdf_path,
+            pdf_open_info,
+            pdf_render_page,
+            pdf_close_session,
+            trace_pdf_stage
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

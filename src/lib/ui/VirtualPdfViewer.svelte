@@ -5,6 +5,7 @@
   import type { PdfSession } from "$lib/core/pdf";
   import {
     buildPageOffsets,
+    calculateAdaptivePrefetchWindow,
     calculateTargetPageWidth,
     estimatePageHeight,
     getPageStartOffset,
@@ -20,7 +21,7 @@
     isViewerZoomOutShortcut,
     isZoomResetShortcut,
   } from "$lib/core/keyboard";
-  import { RenderCache } from "$lib/core/renderCache";
+  import { cacheKey, RenderCache } from "$lib/core/renderCache";
   import { logPdfStage } from "$lib/core/trace";
   import { clampZoom, ZOOM_STEP } from "$lib/state/viewer";
   import PageCanvas from "$lib/ui/PageCanvas.svelte";
@@ -35,7 +36,7 @@
     rendererror: { attemptId: string; page: number; message: string };
   }>();
 
-  const PAGE_GAP = 12;
+  const PAGE_GAP = 0;
   const DEFAULT_RATIO = Math.SQRT2;
   const ACTIVE_PAGES_BEFORE = 1;
   const ACTIVE_PAGES_AFTER = 2;
@@ -46,14 +47,14 @@
   const PREFETCH_MIN = 4;
   const PREFETCH_MAX = 32;
   const PREFETCH_BASE = 10;
-  const PREFETCH_VELOCITY_SCALE = 0.12; // Higher = more aggressive expansion
+  const PREFETCH_VELOCITY_SCALE = 8; // additional pages per 1 px/ms scroll velocity
   let lastScrollTop = 0;
   let lastScrollTime = Date.now();
   let lastScrollDirection = 1; // 1 = down, -1 = up
-  const RESIZE_COMMIT_MS = 180;
-  const TARGET_WIDTH_STEP = 64;
+  const RESIZE_COMMIT_MS = 80;
+  const TARGET_WIDTH_STEP = 1;
   const MIN_RENDER_WIDTH = 240;
-  const PAGE_FIT_PADDING = 32;
+  const PAGE_FIT_PADDING = 0;
   const MAX_RENDER_WIDTH = 1120;
   const ENABLE_VIEWER_DIAGNOSTICS = false;
 
@@ -87,14 +88,19 @@
   let pendingGeometryPreviousWidth = 0;
   let pendingGeometryNextWidth = 0;
 
-  const renderCache = new RenderCache(24);
+  const renderCache = new RenderCache(48, (entry) => {
+    // Revoke blob URLs when cache evicts entries to prevent memory leaks.
+    if (entry.imageUrl.startsWith("blob:")) {
+      URL.revokeObjectURL(entry.imageUrl);
+    }
+  });
 
   function estimatedPageHeight(pageNumber: number, width = pageTargetWidth): number {
     return estimatePageHeight(pageRatios, pageNumber, width, DEFAULT_RATIO);
   }
 
   function pageBlockHeight(pageNumber: number): number {
-    return estimatedPageHeight(pageNumber, pageTargetWidth) + PAGE_GAP;
+    return Math.max(containerHeight, estimatedPageHeight(pageNumber, pageTargetWidth)) + PAGE_GAP;
   }
 
   function rebuildPageOffsets(): void {
@@ -104,6 +110,7 @@
       pageTargetWidth,
       defaultRatio: DEFAULT_RATIO,
       pageGap: PAGE_GAP,
+      containerHeight,
     });
 
     pageStartOffsets = offsets.pageStartOffsets;
@@ -128,15 +135,17 @@
       lastScrollTime = now;
     }
     // Prefetch window grows with velocity, shrinks when slow
-    const dynamicWindow = Math.min(PREFETCH_MAX, Math.max(PREFETCH_MIN, Math.round(PREFETCH_BASE + velocity * 1000 * PREFETCH_VELOCITY_SCALE)));
-    // Bias more pages in scroll direction
-    if (lastScrollDirection > 0) {
-      RENDER_PAGES_BEFORE = Math.floor(dynamicWindow * 0.6);
-      RENDER_PAGES_AFTER = Math.floor(dynamicWindow * 1.2);
-    } else {
-      RENDER_PAGES_BEFORE = Math.floor(dynamicWindow * 1.2);
-      RENDER_PAGES_AFTER = Math.floor(dynamicWindow * 0.6);
-    }
+    const { beforePages, afterPages } = calculateAdaptivePrefetchWindow({
+      velocityPxPerMs: velocity,
+      direction: lastScrollDirection > 0 ? 1 : -1,
+      minPages: PREFETCH_MIN,
+      maxPages: PREFETCH_MAX,
+      basePages: PREFETCH_BASE,
+      velocityScale: PREFETCH_VELOCITY_SCALE,
+    });
+
+    RENDER_PAGES_BEFORE = beforePages;
+    RENDER_PAGES_AFTER = afterPages;
     if (pageCount <= 0) {
       renderWindowStart = 1;
       renderWindowEnd = 0;
@@ -372,10 +381,6 @@
     });
   }
 
-  function updateActiveFromScrollFallback(): void {
-    updateActiveFromScroll();
-  }
-
   function handlePageRenderCommitted(event: CustomEvent<{ pageNumber: number }>): void {
     if (!session || firstRenderCommitted || event.detail.pageNumber !== 1) {
       return;
@@ -472,7 +477,7 @@
       event.preventDefault();
       event.stopPropagation();
       container.scrollTop += container.clientHeight * 0.92;
-      updateActiveFromScrollFallback();
+      updateActiveFromScroll();
       return;
     }
 
@@ -480,7 +485,7 @@
       event.preventDefault();
       event.stopPropagation();
       container.scrollTop -= container.clientHeight * 0.92;
-      updateActiveFromScrollFallback();
+      updateActiveFromScroll();
       return;
     }
 
@@ -488,7 +493,7 @@
       event.preventDefault();
       event.stopPropagation();
       container.scrollTop = 0;
-      updateActiveFromScrollFallback();
+      updateActiveFromScroll();
       return;
     }
 
@@ -496,7 +501,7 @@
       event.preventDefault();
       event.stopPropagation();
       container.scrollTop = container.scrollHeight;
-      updateActiveFromScrollFallback();
+      updateActiveFromScroll();
     }
   }
 
@@ -521,14 +526,34 @@
     }
 
     dispatch("pagechange", { page: 1 });
-    console.info("[PiDF] viewer session initialized", {
-      pageCount,
-      initialActivePages: Object.keys(activeMap),
-      targetWidth: pageTargetWidth,
-      diagnostics: nextSession.diagnostics,
-    });
+    if (ENABLE_VIEWER_DIAGNOSTICS) {
+      console.info("[PiDF] viewer session initialized", {
+        pageCount,
+        initialActivePages: Object.keys(activeMap),
+        targetWidth: pageTargetWidth,
+        diagnostics: nextSession.diagnostics,
+      });
+    }
 
-    void tick().then(() => updateActiveFromScrollFallback());
+    void tick().then(() => updateActiveFromScroll());
+
+    // Pre-render pages 2-10 at low priority so scrolling feels instant.
+    const preRenderCount = Math.min(nextSession.pageCount, 10);
+    if (preRenderCount > 1) {
+      setTimeout(() => {
+        const width = pageTargetWidth || 900;
+        for (let page = 2; page <= preRenderCount; page += 1) {
+          nextSession
+            .renderPage(page, width, 200)
+            .then((result) => {
+              renderCache.set(cacheKey(page, width), result);
+            })
+            .catch(() => {
+              // Pre-render is best-effort; ignore failures.
+            });
+        }
+      }, 500);
+    }
 
     void nextSession
       .getDefaultAspectRatio()
@@ -610,7 +635,7 @@
       resizeObserver.observe(container);
     }
 
-    updateActiveFromScrollFallback();
+    updateActiveFromScroll();
   });
 
   onDestroy(() => {
@@ -684,6 +709,16 @@
     const previousWidth = lastGeometryWidth > 0 ? lastGeometryWidth : pageTargetWidth;
     scheduleGeometryChange(previousWidth, pageTargetWidth);
   }
+
+  function handlePageHeightChange(pageNumber: number, cssWidth: number, cssHeight: number): void {
+    if (pageNumber < 1 || pageNumber > pageCount || cssWidth <= 0) return;
+    const newRatio = cssHeight / cssWidth;
+    if (Math.abs(pageRatios[pageNumber - 1] - newRatio) > 0.001) {
+      pageRatios[pageNumber - 1] = newRatio;
+      rebuildPageOffsets();
+      updateRenderedWindow(currentPage);
+    }
+  }
 </script>
 
 <!-- svelte-ignore a11y_no_noninteractive_tabindex a11y_no_noninteractive_element_interactions -->
@@ -720,7 +755,7 @@
       {#each renderedPageNumbers as pageNumber (pageNumber)}
         <section
           class="slot"
-          style={`min-height:${estimatedPageHeight(pageNumber, pageTargetWidth) + PAGE_GAP}px`}
+          style={`min-height:${Math.max(containerHeight, estimatedPageHeight(pageNumber, pageTargetWidth) + PAGE_GAP)}px`}
         >
             {#if activeMap[pageNumber]}
             <PageCanvas
@@ -731,6 +766,7 @@
               cache={renderCache}
               on:rendercommitted={handlePageRenderCommitted}
               on:rendererror={handlePageRenderError}
+              on:heightchange={event => handlePageHeightChange(event.detail.pageNumber, event.detail.cssWidth, event.detail.cssHeight)}
             />
           {:else}
             <div
@@ -752,7 +788,8 @@
 <style>
   .viewer {
     position: relative;
-    overflow: auto;
+    overflow-y: scroll;
+    overflow-x: auto;
     min-height: 0;
     height: 100%;
     width: 100%;
@@ -761,12 +798,12 @@
   }
 
   .viewer:focus-visible {
-    box-shadow: inset 0 0 0 2px color-mix(in oklab, var(--accent) 35%, transparent);
+    box-shadow: inset 0 0 0 2px color-mix(in oklab, var(--accent) 55%, transparent);
   }
 
   .list {
     width: 100%;
-    padding-top: 0.7rem;
+    padding-top: 0;
   }
 
   .spacer {
@@ -778,16 +815,29 @@
     width: 100%;
     display: flex;
     justify-content: center;
-    align-items: flex-start;
-    margin-bottom: 0.3rem;
+    align-items: center;
+    margin-bottom: 0;
   }
 
   .placeholder {
     width: min(1700px, calc(100% - 48px));
     max-width: calc(100% - 48px);
-    border: 1px solid rgb(255 255 255 / 0.08);
-    border-radius: 0.2rem;
-    background: rgb(255 255 255 / 0.03);
+    border: 1px dashed color-mix(in oklab, var(--line) 60%, transparent);
+    border-radius: 0.45rem;
+    background: color-mix(in oklab, var(--text) 2%, transparent);
+    animation: viewer-pulse 2s ease-in-out infinite alternate;
+  }
+
+  @keyframes viewer-pulse {
+    0% { opacity: 0.5; }
+    100% { opacity: 0.95; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .placeholder {
+      animation: none;
+      opacity: 0.85;
+    }
   }
 
   .empty {

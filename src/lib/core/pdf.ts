@@ -1,4 +1,4 @@
-import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/core";
 import { withTimeout } from "./async";
 import { createPdfOpenTrace } from "./trace";
 
@@ -21,9 +21,10 @@ interface PdfOpenInfo {
 }
 
 interface PdfRenderedPagePayload {
-  imagePath: string;
+  data: number[];
   width: number;
   height: number;
+  mime: string;
 }
 
 export interface PdfRenderedPage {
@@ -53,6 +54,16 @@ function describeError(error: unknown): { name?: string; message: string; stack?
 
 function normalizeTargetWidth(targetWidth: number): number {
   return Math.round(Math.max(MIN_TARGET_WIDTH, Math.min(MAX_TARGET_WIDTH, targetWidth || 0)));
+}
+
+/**
+ * Convert backend raw bytes into a browser blob URL.
+ * The caller is responsible for revoking the URL when no longer needed.
+ */
+function bytesToBlobUrl(data: number[], mime: string): string {
+  const bytes = new Uint8Array(data);
+  const blob = new Blob([bytes], { type: mime });
+  return URL.createObjectURL(blob);
 }
 
 export class PdfSession {
@@ -109,14 +120,14 @@ export class PdfSession {
       `PDF render timed out after ${PAGE_RENDER_TIMEOUT_MS}ms (page ${normalizedPage}).`,
     )
       .then((payload) => {
-        const imageUrl = convertFileSrc(payload.imagePath);
+        const imageUrl = bytesToBlobUrl(payload.data, payload.mime || "image/jpeg");
 
         if (ENABLE_RENDER_DIAGNOSTICS) {
           console.info("[PiDF] backend render payload", {
             pageNumber: normalizedPage,
             targetWidth: normalizedWidth,
-            imagePath: payload.imagePath,
-            imageUrl,
+            byteLength: payload.data.length,
+            imageUrl: `${imageUrl.substring(0, 40)}...`,
             width: payload.width,
             height: payload.height,
           });

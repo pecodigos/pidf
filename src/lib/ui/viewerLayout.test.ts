@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildPageOffsets,
+  calculateAdaptivePrefetchWindow,
   calculateTargetPageWidth,
   estimatePageHeight,
   getPageStartOffset,
@@ -77,5 +78,40 @@ describe("viewerLayout", () => {
     expect(getPageStartOffset([0], 0, 1)).toBe(0);
     expect(getPageStartOffset([0, 0, 300], 1, 2)).toBe(300);
     expect(estimatePageHeight([], 1, 100, 1.4)).toBe(140);
+  });
+
+  it("computes adaptive prefetch window based on velocity and direction", () => {
+    expect(
+      calculateAdaptivePrefetchWindow({
+        velocityPxPerMs: 0,
+        direction: 1,
+        minPages: 4,
+        maxPages: 32,
+        basePages: 10,
+        velocityScale: 8,
+      }),
+    ).toEqual({ dynamicWindow: 10, beforePages: 6, afterPages: 12 });
+
+    expect(
+      calculateAdaptivePrefetchWindow({
+        velocityPxPerMs: 2,
+        direction: 1,
+        minPages: 4,
+        maxPages: 32,
+        basePages: 10,
+        velocityScale: 8,
+      }),
+    ).toEqual({ dynamicWindow: 26, beforePages: 15, afterPages: 31 });
+
+    expect(
+      calculateAdaptivePrefetchWindow({
+        velocityPxPerMs: 2,
+        direction: -1,
+        minPages: 4,
+        maxPages: 32,
+        basePages: 10,
+        velocityScale: 8,
+      }),
+    ).toEqual({ dynamicWindow: 26, beforePages: 31, afterPages: 15 });
   });
 });

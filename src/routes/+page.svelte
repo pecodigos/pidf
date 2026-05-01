@@ -16,6 +16,11 @@
     isZoomOutShortcut,
     isZoomResetShortcut,
   } from "$lib/core/keyboard";
+  import { extractFileName } from "$lib/core/path";
+  import {
+    applyThemePreference,
+    persistThemePreference as persistThemePreferenceToStorage,
+  } from "$lib/core/themePreference";
   import { logPdfStage } from "$lib/core/trace";
   import {
     currentPage,
@@ -33,6 +38,8 @@
   import Sidebar from "$lib/ui/Sidebar.svelte";
   import Toolbar from "$lib/ui/Toolbar.svelte";
   import VirtualPdfViewer from "$lib/ui/VirtualPdfViewer.svelte";
+  import ErrorBanner from "$lib/ui/ErrorBanner.svelte";
+  import FindPanel from "$lib/ui/FindPanel.svelte";
 
   let viewer: VirtualPdfViewer | null = null;
   let session: PdfSession | null = null;
@@ -44,16 +51,13 @@
   let copyFeedback = "";
   let showSidebar = false;
   let showFindPanel = false;
-  let findPageField = "1";
-  let findPanelInput: HTMLInputElement | null = null;
-  let findPanelElement: HTMLDivElement | null = null;
+  let findPanelComponent: FindPanel | null = null;
   let lastAttemptedPath: string | null = null;
   let activeOpenRequestId = 0;
   const appWindow = getCurrentWindow();
   const OPEN_PDF_TIMEOUT_MS = 45000;
   const FIRST_RENDER_TIMEOUT_MS = 12000;
   const SESSION_DESTROY_TIMEOUT_MS = 5000;
-  const THEME_STORAGE_KEY = "pidf.theme";
 
   type PendingFirstRender = {
     attemptId: string;
@@ -87,44 +91,8 @@
     }, 1800);
   }
 
-  function readStoredThemePreference(): boolean | null {
-    try {
-      const storedValue = window.localStorage.getItem(THEME_STORAGE_KEY);
-      if (storedValue === "dark") {
-        return true;
-      }
-
-      if (storedValue === "light") {
-        return false;
-      }
-    } catch (error) {
-      console.warn("[PiDF] failed to read stored theme preference", error);
-    }
-
-    return null;
-  }
-
-  function persistThemePreference(nextIsDark: boolean): void {
-    try {
-      window.localStorage.setItem(THEME_STORAGE_KEY, nextIsDark ? "dark" : "light");
-    } catch (error) {
-      console.warn("[PiDF] failed to persist theme preference", error);
-    }
-  }
-
   function applyInitialThemePreference(): void {
-    const storedPreference = readStoredThemePreference();
-    if (storedPreference !== null) {
-      darkMode.set(storedPreference);
-      return;
-    }
-
-    darkMode.set(window.matchMedia("(prefers-color-scheme: dark)").matches);
-  }
-
-  function extractFileName(path: string): string {
-    const parts = path.split(/[\\/]/);
-    return parts[parts.length - 1] || path;
+    darkMode.set(applyThemePreference(window.localStorage, window.matchMedia));
   }
 
   function waitForFirstRender(attemptId: string): Promise<void> {
@@ -179,28 +147,11 @@
     if ($pageCount <= 0) {
       return;
     }
-
     showFindPanel = true;
-    findPageField = String($currentPage);
-    window.requestAnimationFrame(() => {
-      findPanelInput?.focus();
-      findPanelInput?.select();
-    });
   }
 
   function closeFindPanel(): void {
     showFindPanel = false;
-  }
-
-  function submitFindPanelJump(): void {
-    const parsedPage = Number.parseInt(findPageField, 10);
-    if (!Number.isFinite(parsedPage)) {
-      findPageField = String($currentPage);
-      return;
-    }
-
-    jumpToPage(parsedPage);
-    closeFindPanel();
   }
 
   function monitorFirstRender(nextSession: PdfSession, selectedPath: string): void {
@@ -261,8 +212,6 @@
     copyFeedback = "";
     setStatusMessage("Opening PDF...");
 
-    console.info("[PiDF] opening selected PDF", { path: selectedPath });
-
     let nextSession: PdfSession | null = null;
 
     try {
@@ -284,11 +233,13 @@
 
       session = nextSession;
 
-      fileName.set(extractFileName(selectedPath));
+      const openedFileName = extractFileName(selectedPath);
+
+      fileName.set(openedFileName);
       setPageCount(nextSession.pageCount);
       setCurrentPage(1);
       showFindPanel = false;
-      setStatusMessage(`Opened ${extractFileName(selectedPath)}.`);
+      setStatusMessage(`Opened ${openedFileName}.`);
 
       monitorFirstRender(nextSession, selectedPath);
       void destroySessionSafely(previousSession);
@@ -377,7 +328,7 @@
   function toggleTheme(): void {
     darkMode.update((value) => {
       const nextValue = !value;
-      persistThemePreference(nextValue);
+      persistThemePreferenceToStorage(window.localStorage, nextValue);
       return nextValue;
     });
   }
@@ -416,12 +367,12 @@
     applyInitialThemePreference();
 
     const onWindowPointerDown = (event: PointerEvent) => {
-      if (!showFindPanel || !findPanelElement) {
+      if (!showFindPanel || !findPanelComponent) {
         return;
       }
 
       const target = event.target;
-      if (target instanceof Node && !findPanelElement.contains(target)) {
+      if (target instanceof Node && !findPanelComponent.contains(target)) {
         closeFindPanel();
       }
     };
@@ -545,45 +496,13 @@
   />
 
   {#if showFindPanel}
-    <div
-      class="find-panel"
-      bind:this={findPanelElement}
-      role="dialog"
-      aria-label="Find and jump"
-      aria-modal="false"
-    >
-      <div class="find-header">
-        <h2>Find</h2>
-        <button
-          type="button"
-          class="find-close"
-          on:click={closeFindPanel}
-          aria-label="Close find panel"
-        >
-          Close
-        </button>
-      </div>
-
-      <p class="find-hint">Text search is not available in image mode yet. Jump to a page instead.</p>
-
-      <form class="find-form" on:submit|preventDefault={submitFindPanelJump}>
-        <label class="find-field" for="find-page-input">
-          Page
-        </label>
-        <input
-          id="find-page-input"
-          bind:this={findPanelInput}
-          bind:value={findPageField}
-          type="number"
-          min="1"
-          max={Math.max(1, $pageCount)}
-          inputmode="numeric"
-          aria-label="Jump to page"
-        />
-
-        <button type="submit">Go</button>
-      </form>
-    </div>
+    <FindPanel
+      bind:this={findPanelComponent}
+      pageCount={$pageCount}
+      currentPage={$currentPage}
+      on:close={closeFindPanel}
+      on:jump={(event) => jumpToPage(event.detail.page)}
+    />
   {/if}
 
   <div class="workbench" class:with-sidebar={showSidebar}>
@@ -607,19 +526,16 @@
   </div>
 
   {#if errorMessage}
-    <div class="error" role="alert">
-      <p>{errorMessage}</p>
-      <div class="error-actions">
-        <button on:click={() => void retryLastOpen()} disabled={loading || !lastAttemptedPath}>
-          Retry
-        </button>
-        <button on:click={() => void openPdf()} disabled={loading}>Open Another PDF</button>
-        <button on:click={() => void copyErrorDetails()} disabled={!errorDetails}>Copy Details</button>
-        {#if copyFeedback}
-          <span class="error-feedback" role="status" aria-live="polite">{copyFeedback}</span>
-        {/if}
-      </div>
-    </div>
+    <ErrorBanner
+      message={errorMessage}
+      hasDetails={!!errorDetails}
+      {copyFeedback}
+      {loading}
+      canRetry={!!lastAttemptedPath}
+      on:retry={() => void retryLastOpen()}
+      on:open={() => void openPdf()}
+      on:copydetails={() => void copyErrorDetails()}
+    />
   {/if}
 </main>
 
@@ -630,8 +546,32 @@
     width: 100%;
     height: 100%;
     overflow: hidden;
-    font-family: "IBM Plex Sans", "Segoe UI", "Noto Sans", sans-serif;
+    font-family: "Inter", "Segoe UI", "Noto Sans", sans-serif;
     text-rendering: geometricPrecision;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  :global(::-webkit-scrollbar) {
+    width: 12px;
+    height: 12px;
+  }
+
+  :global(::-webkit-scrollbar-track) {
+    background: transparent;
+  }
+
+  :global(::-webkit-scrollbar-thumb) {
+    background: color-mix(in oklab, var(--muted) 40%, transparent);
+    border: 3px solid transparent;
+    background-clip: padding-box;
+    border-radius: 9999px;
+  }
+
+  :global(::-webkit-scrollbar-thumb:hover) {
+    background: color-mix(in oklab, var(--muted) 60%, transparent);
+    border: 3px solid transparent;
+    background-clip: padding-box;
   }
 
   :global(body) {
@@ -639,13 +579,13 @@
   }
 
   .app {
-    --bg: #eceff4;
-    --panel: #e4e9f1;
-    --panel-raised: #f5f8ff;
-    --text: #16202a;
-    --muted: #546376;
-    --line: #bdc8d6;
-    --accent: #1c6fbf;
+    --bg: #f4f6f8;
+    --panel: rgb(255 255 255 / 0.96);
+    --panel-raised: #ffffff;
+    --text: #171a1c;
+    --muted: #5e656d;
+    --line: rgb(0 0 0 / 0.08);
+    --accent: #3b82f6;
 
     width: 100vw;
     height: 100vh;
@@ -656,13 +596,13 @@
   }
 
   .app.dark {
-    --bg: #0f141a;
-    --panel: #131b24;
-    --panel-raised: #1a2431;
-    --text: #d9e4ef;
-    --muted: #8c9fb4;
-    --line: #2a3949;
-    --accent: #4ea3ed;
+    --bg: #0b0d0f;
+    --panel: rgb(22 25 29 / 0.96);
+    --panel-raised: rgb(30 35 40 / 1);
+    --text: #dde2e8;
+    --muted: #7f8a96;
+    --line: rgb(255 255 255 / 0.08);
+    --accent: #60a5fa;
   }
 
   .workbench {
@@ -672,160 +612,11 @@
     border-top: 1px solid color-mix(in oklab, var(--line) 40%, transparent);
   }
 
-  .find-panel {
-    position: fixed;
-    top: 4.35rem;
-    right: 1rem;
-    z-index: 40;
-    width: min(24rem, calc(100vw - 2rem));
-    border: 1px solid var(--line);
-    border-radius: 0.8rem;
-    background: var(--panel);
-    color: var(--text);
-    box-shadow: 0 20px 32px rgb(0 0 0 / 0.18);
-    padding: 0.85rem;
-    display: grid;
-    gap: 0.7rem;
-    animation: find-panel-enter 140ms ease-out;
-  }
-
-  @keyframes find-panel-enter {
-    from {
-      opacity: 0;
-      transform: translateY(-6px) scale(0.985);
-    }
-
-    to {
-      opacity: 1;
-      transform: translateY(0) scale(1);
-    }
-  }
-
-  .find-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.75rem;
-  }
-
-  .find-header h2 {
-    margin: 0;
-    font-size: 0.98rem;
-    letter-spacing: 0.01em;
-  }
-
-  .find-hint {
-    margin: 0;
-    color: var(--muted);
-    font-size: 0.86rem;
-    line-height: 1.35;
-  }
-
-  .find-form {
-    display: grid;
-    grid-template-columns: auto 1fr auto;
-    gap: 0.55rem;
-    align-items: center;
-  }
-
-  .find-field {
-    font-size: 0.88rem;
-    color: var(--muted);
-  }
-
-  .find-form input,
-  .find-form button,
-  .find-close {
-    border: 1px solid var(--line);
-    border-radius: 0.6rem;
-    background: var(--panel-raised);
-    color: var(--text);
-    font: inherit;
-    min-height: 2.35rem;
-  }
-
-  .find-form input {
-    padding: 0 0.65rem;
-  }
-
-  .find-form button,
-  .find-close {
-    padding: 0 0.8rem;
-    cursor: pointer;
-    transition: border-color 120ms ease, box-shadow 120ms ease, background-color 120ms ease;
-  }
-
-  .find-form button:hover,
-  .find-close:hover {
-    border-color: color-mix(in oklab, var(--accent) 36%, var(--line));
-  }
-
-  .find-form button:focus-visible,
-  .find-form input:focus-visible,
-  .find-close:focus-visible {
-    outline: none;
-    border-color: color-mix(in oklab, var(--accent) 60%, var(--line));
-    box-shadow: 0 0 0 2px color-mix(in oklab, var(--accent) 28%, transparent);
-  }
-
   .workbench.with-sidebar {
     grid-template-columns: auto 1fr;
   }
 
-  .error {
-    margin: 0;
-    padding: 0.7rem 0.9rem;
-    display: grid;
-    gap: 0.55rem;
-    color: #ffced1;
-    background: rgb(123 24 24 / 0.92);
-    border-top: 1px solid rgb(242 108 108 / 0.5);
-  }
 
-  .error p {
-    margin: 0;
-    font-size: 0.88rem;
-  }
-
-  .error-actions {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.45rem;
-  }
-
-  .error-actions button {
-    border: 1px solid rgb(242 108 108 / 0.7);
-    border-radius: 0.5rem;
-    background: rgb(93 17 17 / 0.55);
-    color: #ffe0e3;
-    font: inherit;
-    font-size: 0.82rem;
-    min-height: 2rem;
-    padding: 0 0.75rem;
-    cursor: pointer;
-    transition: background-color 120ms ease, box-shadow 120ms ease;
-  }
-
-  .error-actions button:hover:not(:disabled) {
-    background: rgb(111 24 24 / 0.65);
-  }
-
-  .error-actions button:focus-visible {
-    outline: none;
-    box-shadow: 0 0 0 2px rgb(255 193 198 / 0.45);
-  }
-
-  .error-actions button:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
-  }
-
-  .error-feedback {
-    align-self: center;
-    font-size: 0.8rem;
-    color: #ffd6da;
-    margin-left: 0.25rem;
-  }
 
   .sr-only {
     position: absolute;
@@ -839,34 +630,7 @@
     border: 0;
   }
 
-  @media (prefers-reduced-motion: reduce) {
-    .find-panel {
-      animation: none;
-    }
-
-    .find-form button,
-    .find-close,
-    .error-actions button {
-      transition: none;
-    }
-  }
-
   @media (max-width: 860px) {
-    .find-panel {
-      top: 8rem;
-      left: 1rem;
-      right: 1rem;
-      width: auto;
-    }
-
-    .find-form {
-      grid-template-columns: 1fr;
-    }
-
-    .find-field {
-      display: none;
-    }
-
     .workbench {
       grid-template-columns: 1fr;
     }

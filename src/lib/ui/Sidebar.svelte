@@ -1,5 +1,6 @@
 <script lang="ts">
   import { createEventDispatcher } from "svelte";
+  import { slide } from "svelte/transition";
 
   export let pageCount = 0;
   export let currentPage = 1;
@@ -30,7 +31,7 @@
   $: lastVisiblePage = visiblePages.length > 0 ? visiblePages[visiblePages.length - 1] : 1;
 </script>
 
-<aside class="sidebar" aria-label="Page sidebar">
+<aside class="sidebar" aria-label="Page sidebar" transition:slide={{ axis: 'x', duration: 250 }}>
   <div class="meta">
     <p>{pageCount} pages</p>
     {#if pageCount > 0}<p>{firstVisiblePage}-{lastVisiblePage}</p>{/if}
@@ -42,6 +43,7 @@
         class:selected={page === currentPage}
         on:click={() => dispatch("jump", { page })}
         aria-label={`Go to page ${page}`}
+        aria-current={page === currentPage ? "page" : undefined}
       >
         {page}
       </button>
@@ -87,10 +89,17 @@
     color: var(--muted);
     cursor: pointer;
     font-size: 0.86rem;
+    transition: transform 150ms cubic-bezier(0.16, 1, 0.3, 1), border-color 150ms ease, box-shadow 150ms ease, background-color 150ms ease;
   }
 
   button:hover {
-    border-color: color-mix(in oklab, var(--accent) 32%, var(--line));
+    transform: scale(1.02);
+    border-color: color-mix(in oklab, var(--accent) 40%, var(--line));
+    background: var(--panel);
+  }
+
+  button:active {
+    transform: scale(0.96);
   }
 
   button:focus-visible {
@@ -102,6 +111,18 @@
   button.selected {
     color: var(--text);
     border-color: var(--accent);
-    box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--accent) 40%, transparent);
+    background: color-mix(in oklab, var(--accent) 10%, var(--panel-raised));
+    box-shadow: 0 4px 12px rgb(0 0 0 / 0.1), inset 0 0 0 1px color-mix(in oklab, var(--accent) 40%, transparent);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    button {
+      transition: none;
+    }
+
+    button:hover,
+    button:active {
+      transform: none;
+    }
   }
 </style>

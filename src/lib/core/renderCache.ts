@@ -7,9 +7,11 @@ export interface CachedRender {
 export class RenderCache {
   #entries = new Map<string, CachedRender>();
   #maxEntries: number;
+  #onEvict?: (entry: CachedRender) => void;
 
-  constructor(maxEntries = 20) {
+  constructor(maxEntries = 20, onEvict?: (entry: CachedRender) => void) {
     this.#maxEntries = Math.max(4, maxEntries);
+    this.#onEvict = onEvict;
   }
 
   get(key: string): CachedRender | undefined {
@@ -18,6 +20,7 @@ export class RenderCache {
       return undefined;
     }
 
+    // LRU: re-insert at end
     this.#entries.delete(key);
     this.#entries.set(key, entry);
     return entry;
@@ -27,6 +30,7 @@ export class RenderCache {
     const existing = this.#entries.get(key);
     if (existing) {
       this.#entries.delete(key);
+      this.#evictEntry(existing);
     }
 
     this.#entries.set(key, value);
@@ -36,13 +40,29 @@ export class RenderCache {
       if (!oldestKey) {
         break;
       }
-
-      this.#entries.delete(oldestKey);
+      const oldest = this.#entries.get(oldestKey);
+      if (oldest) {
+        this.#entries.delete(oldestKey);
+        this.#evictEntry(oldest);
+      }
     }
   }
 
   clear(): void {
+    for (const entry of this.#entries.values()) {
+      this.#evictEntry(entry);
+    }
     this.#entries.clear();
+  }
+
+  #evictEntry(entry: CachedRender): void {
+    if (this.#onEvict) {
+      try {
+        this.#onEvict(entry);
+      } catch {
+        // eviction callback is best-effort
+      }
+    }
   }
 }
 

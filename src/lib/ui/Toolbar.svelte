@@ -29,13 +29,20 @@
   }
 
   function submitPageJump(): void {
+    if (pageCount <= 0) {
+      pageField = "1";
+      return;
+    }
+
     const parsedPage = Number.parseInt(pageField, 10);
     if (!Number.isFinite(parsedPage)) {
       pageField = String(currentPage);
       return;
     }
 
-    dispatch("jump", { page: parsedPage });
+    const normalizedPage = Math.max(1, Math.min(normalizedPageCount, parsedPage));
+    pageField = String(normalizedPage);
+    dispatch("jump", { page: normalizedPage });
   }
 
   function handlePageFieldKeydown(event: KeyboardEvent): void {
@@ -123,10 +130,14 @@
       <label class="jump" aria-label="Jump to page">
         <span class="jump-label">Page</span>
         <input
-          type="text"
+          type="number"
+          min="1"
+          max={normalizedPageCount}
+          step="1"
           inputmode="numeric"
           aria-label="Page number"
           bind:value={pageField}
+          disabled={loading || pageCount <= 0}
           on:focus={() => (isEditingPageField = true)}
           on:blur={() => {
             isEditingPageField = false;
@@ -161,13 +172,10 @@
     top: 0;
     z-index: 24;
     border-bottom: 1px solid var(--line);
-    background:
-      linear-gradient(
-        180deg,
-        color-mix(in oklab, var(--panel) 92%, var(--bg)) 0%,
-        color-mix(in oklab, var(--panel) 84%, var(--bg)) 100%
-      );
-    box-shadow: 0 1px 0 rgb(255 255 255 / 0.08) inset;
+    background: color-mix(in oklab, var(--panel) 85%, transparent);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    box-shadow: 0 8px 24px rgb(0 0 0 / 0.04), 0 1px 0 rgb(255 255 255 / 0.05) inset;
   }
 
   .toolbar-shell {
@@ -236,6 +244,7 @@
     cursor: pointer;
     font-size: 0.84rem;
     letter-spacing: 0.01em;
+    transition: transform 150ms cubic-bezier(0.16, 1, 0.3, 1), border-color 150ms ease, box-shadow 150ms ease, background-color 150ms ease;
   }
 
   .btn.theme {
@@ -243,7 +252,13 @@
   }
 
   .btn:hover:not(:disabled) {
-    border-color: color-mix(in oklab, var(--accent) 32%, var(--line));
+    transform: scale(1.02);
+    border-color: color-mix(in oklab, var(--accent) 40%, var(--line));
+    background: var(--panel);
+  }
+
+  .btn:active:not(:disabled) {
+    transform: scale(0.96);
   }
 
   .btn:focus-visible,
